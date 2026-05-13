@@ -56,18 +56,24 @@ def obtener_comercio_id(instancia):
         print(f"[Supabase] ❌ Error buscando comercio: {e}")
     return None
 
-def guardar_contacto(lid, numero, nombre, comercio_id):
+TU_NUMERO = "5492494600615@s.whatsapp.net"
+
+def guardar_contacto(lid, numero, nombre):
     try:
-        result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", comercio_id).execute()
+        # No guardar si el número es el tuyo propio
+        if numero == TU_NUMERO:
+            print(f"[Supabase] ⚠️ Ignorando mapeo con tu propio número")
+            return
+        result = supabase.table("contactos").select("numero").eq("lid", lid).execute()
         if result.data:
+            print(f"[Supabase] ℹ️ Contacto ya existe, no se sobreescribe: {lid}")
             return
         supabase.table("contactos").insert({
             "lid": lid,
             "numero": numero,
-            "nombre": nombre,
-            "comercio_id": comercio_id
+            "nombre": nombre
         }).execute()
-        print(f"[Supabase] ✅ Contacto guardado: {lid} → {numero} (Comercio: {comercio_id})")
+        print(f"[Supabase] ✅ Contacto guardado: {lid} → {numero}")
     except Exception as e:
         print(f"[Supabase] ❌ Error guardando contacto: {e}")
 
