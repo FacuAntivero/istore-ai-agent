@@ -1,8 +1,12 @@
 from google.genai import errors
 from agent import iniciar_agente
 
+# 💡 ID de tu comercio para pruebas en la terminal
+COMERCIO_TEST_ID = "85d583ba-9421-4225-b337-52cef3c66d9f"
+
 def main():
-    chat = iniciar_agente()
+    # Le pasamos el ID al inicializar el agente
+    chat = iniciar_agente(COMERCIO_TEST_ID)
     
     print("🤖 Agente de Ventas iniciado. Escribe 'salir' para terminar.")
     
@@ -26,6 +30,5 @@ def main():
         except Exception as e:
             print(f"\n[Sistema] ❌ Ocurrió un error inesperado: {str(e)}")
 
-# Esto asegura que el script principal solo se ejecute si lo llamamos directamente
 if __name__ == "__main__":
     main()

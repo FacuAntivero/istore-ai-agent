@@ -8,7 +8,6 @@ from google.genai import errors
 from supabase import create_client
 import requests
 import json
-import os
 import asyncio
 from dotenv import load_dotenv
 
@@ -26,57 +25,74 @@ class NgrokHeaderMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(NgrokHeaderMiddleware)
 
-# DICCIONARIO DE SESIONES
+# DICCIONARIO DE SESIONES (Clave única: comercio_id + numero_usuario)
 sesiones_chat = {}
 
 # SET DE MENSAJES YA PROCESADOS (anti-duplicado)
 mensajes_procesados = set()
-
-# MENSAJES PENDIENTES (esperando el segundo webhook con número real)
 mensajes_pendientes = {}
 
 # Configuraciones de Evolution API
 EVOLUTION_API_URL = "https://evolution-api-production-8717.up.railway.app"
 API_KEY = "2977506C-B874-4465-AA51-F92A6F64DAD7"
-INSTANCE_NAME = "istoreBot"
+# La instancia ahora se lee dinámicamente del Webhook
 
 # Supabase
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
+# Caché de comercios para no consultar la base de datos en CADA mensaje
+CACHE_COMERCIOS = {}
 
-def guardar_contacto(lid, numero, nombre):
+def obtener_comercio_id(instancia):
+    if instancia in CACHE_COMERCIOS:
+        return CACHE_COMERCIOS[instancia]
     try:
-        result = supabase.table("contactos").select("numero").eq("lid", lid).execute()
+        res = supabase.table("comercios").select("id").eq("evolution_instance", instancia).execute()
+        if res.data:
+            comercio_id = res.data[0]["id"]
+            CACHE_COMERCIOS[instancia] = comercio_id
+            return comercio_id
+    except Exception as e:
+        print(f"[Supabase] ❌ Error buscando comercio: {e}")
+    return None
+
+def guardar_contacto(lid, numero, nombre, comercio_id):
+    try:
+        result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", comercio_id).execute()
         if result.data:
-            print(f"[Supabase] ℹ️ Contacto ya existe, no se sobreescribe: {lid}")
             return
         supabase.table("contactos").insert({
             "lid": lid,
             "numero": numero,
-            "nombre": nombre
+            "nombre": nombre,
+            "comercio_id": comercio_id
         }).execute()
-        print(f"[Supabase] ✅ Contacto guardado: {lid} → {numero}")
+        print(f"[Supabase] ✅ Contacto guardado: {lid} → {numero} (Comercio: {comercio_id})")
     except Exception as e:
         print(f"[Supabase] ❌ Error guardando contacto: {e}")
 
-
-def obtener_numero_real(lid):
+def obtener_numero_real(lid, comercio_id):
     try:
-        result = supabase.table("contactos").select("numero").eq("lid", lid).execute()
+        result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", comercio_id).execute()
         if result.data:
             return result.data[0]["numero"]
     except Exception as e:
-        print(f"[Supabase] ❌ Error buscando contacto: {e}")
+        pass
     return None
-
 
 @app.post("/webhook")
 async def recibir_mensaje(request: Request):
     datos = await request.json()
 
-    print("\n🔍 --- INSPECCIONANDO EL JSON COMPLETO --- 🔍")
-    print(json.dumps(datos, indent=2))
-    print("--------------------------------------------\n")
+    # 1. Identificar a qué comercio pertenece este mensaje
+    instance_name = datos.get("instance")
+    if not instance_name:
+        return {"status": "ignorado", "motivo": "Falta parámetro instance en webhook"}
+
+    comercio_id = obtener_comercio_id(instance_name)
+    if not comercio_id:
+        print(f"[Sistema] ⚠️ Instancia ignorada o no registrada: {instance_name}")
+        return {"status": "error", "motivo": "Comercio no encontrado"}
 
     evento = datos.get("event", "")
 
@@ -88,8 +104,7 @@ async def recibir_mensaje(request: Request):
             lid = context_info.get("participant", "")
             numero_real = msg_data.get("key", {}).get("remoteJid", "")
             if lid.endswith("@lid") and numero_real.endswith("@s.whatsapp.net"):
-                guardar_contacto(lid, numero_real, "")
-                print(f"[Sistema] 📝 Mapeado automático: {lid} → {numero_real}")
+                guardar_contacto(lid, numero_real, "", comercio_id)
         except Exception as e:
             print(f"[Sistema] Error en mapeo automático: {e}")
         return {"status": "ok"}
@@ -116,77 +131,65 @@ async def recibir_mensaje(request: Request):
 
         if remote_jid.endswith("@s.whatsapp.net"):
             id_remitente = remote_jid
-
-            # Si hay un mensaje pendiente con este mismo id, usamos ese texto
             if id_mensaje in mensajes_pendientes:
                 pendiente = mensajes_pendientes.pop(id_mensaje)
                 texto_usuario = pendiente["texto"]
                 push_name = pendiente["push_name"]
-                print(f"[Sistema] ✅ Procesando mensaje pendiente para {id_remitente}")
 
-            # Anti-duplicado
             if id_mensaje in mensajes_procesados:
-                print(f"[Sistema] 🔄 Mensaje duplicado ignorado: {id_mensaje}")
                 return {"status": "ignorado", "motivo": "mensaje duplicado"}
             mensajes_procesados.add(id_mensaje)
 
         elif remote_jid.endswith("@lid"):
-            numero_guardado = obtener_numero_real(remote_jid)
+            numero_guardado = obtener_numero_real(remote_jid, comercio_id)
             if numero_guardado:
                 id_remitente = numero_guardado
-                print(f"[Sistema] ✅ Número resuelto desde Supabase: {id_remitente}")
-
                 if id_mensaje in mensajes_procesados:
-                    print(f"[Sistema] 🔄 Mensaje duplicado ignorado: {id_mensaje}")
                     return {"status": "ignorado", "motivo": "mensaje duplicado"}
                 mensajes_procesados.add(id_mensaje)
             else:
-                # Primera vez — guardamos pendiente y esperamos 2 segundos
                 mensajes_pendientes[id_mensaje] = {
                     "texto": texto_usuario,
                     "push_name": push_name,
                     "lid": remote_jid
                 }
-                print(f"[Sistema] ⏳ Mensaje pendiente: {id_mensaje}, esperando 2 segundos...")
-
                 await asyncio.sleep(2)
-
-                # Si después de 2 segundos no fue procesado por el segundo webhook
                 if id_mensaje in mensajes_pendientes:
                     pendiente = mensajes_pendientes.pop(id_mensaje)
                     id_remitente = sender
                     texto_usuario = pendiente["texto"]
                     push_name = pendiente["push_name"]
                     mensajes_procesados.add(id_mensaje)
-                    print(f"[Sistema] ⚠️ Timeout, usando sender como fallback: {id_remitente}")
                 else:
-                    print(f"[Sistema] ✅ Ya procesado por segundo webhook")
                     return {"status": "procesado por segundo webhook"}
         else:
             id_remitente = remote_jid
 
-        print(f"\n[Red] 📩 Mensaje recibido de {id_remitente} ({push_name}): {texto_usuario}")
+        print(f"\n[Comercio: {instance_name}] 📩 Mensaje de {id_remitente}: {texto_usuario}")
 
     except Exception as e:
-        print(f"Error procesando el JSON de WhatsApp: {e}")
+        print(f"Error procesando JSON de WhatsApp: {e}")
         return {"status": "error"}
 
-    if id_remitente not in sesiones_chat:
-        print(f"[Sistema] 🆕 Creando nueva sesión para {id_remitente}")
-        sesiones_chat[id_remitente] = iniciar_agente()
+    # Generamos una ID de sesión combinada (Comercio + Remitente)
+    session_key = f"{comercio_id}_{id_remitente}"
 
-    chat_actual = sesiones_chat[id_remitente]
+    if session_key not in sesiones_chat:
+        print(f"[Sistema] 🆕 Creando agente Gemini para la sesión {session_key}")
+        sesiones_chat[session_key] = iniciar_agente(comercio_id) # ¡AQUÍ PASAMOS EL COMERCIO!
+
+    chat_actual = sesiones_chat[session_key]
 
     try:
         respuesta = chat_actual.send_message(texto_usuario)
         texto_respuesta = respuesta.text
         print(f"[Agente] 🤖 Respondió: {texto_respuesta}")
-        enviar_mensaje_whatsapp(id_remitente, texto_respuesta, id_mensaje, remote_jid)
+        enviar_mensaje_whatsapp(id_remitente, texto_respuesta, instance_name, id_mensaje, remote_jid)
         return {"status": "success"}
 
     except errors.APIError as e:
         print(f"[Error API] {e.message}")
-        enviar_mensaje_whatsapp(id_remitente, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", id_mensaje, remote_jid)
+        enviar_mensaje_whatsapp(id_remitente, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, id_mensaje, remote_jid)
         return {"status": "error"}
 
     except Exception as e:
@@ -194,8 +197,9 @@ async def recibir_mensaje(request: Request):
         raise HTTPException(status_code=500, detail="Ocurrió un error en el servidor")
 
 
-def enviar_mensaje_whatsapp(numero_destino, texto, id_mensaje=None, remote_jid=None):
-    url = f"{EVOLUTION_API_URL}/message/sendText/{INSTANCE_NAME}"
+def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
+    # La URL ahora usa la instancia dinámica
+    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
@@ -219,7 +223,5 @@ def enviar_mensaje_whatsapp(numero_destino, texto, id_mensaje=None, remote_jid=N
         }
 
     respuesta = requests.post(url, headers=headers, json=payload)
-    if respuesta.status_code in [200, 201]:
-        print("✅ ¡Mensaje entregado a WhatsApp con éxito!")
-    else:
+    if respuesta.status_code not in [200, 201]:
         print(f"❌ Error al enviar mensaje: {respuesta.text}")

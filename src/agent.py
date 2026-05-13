@@ -1,11 +1,29 @@
 from google import genai
 from google.genai import types
 import config
-from tools import consultar_inventario, consultar_horarios, agendar_cita
+import tools # ⬅️ Cambiamos la forma de importar para poder envolver las funciones
 
 client = genai.Client(api_key=config.GEMINI_API_KEY)
 
-def iniciar_agente():
+def iniciar_agente(comercio_id): # ⬅️ AHORA RECIBE EL ID
+    
+    # --- WRAPPERS (ENVOLTORIOS) DE SEGURIDAD ---
+    # Gemini usará estas funciones locales, y nosotros le inyectamos 
+    # el comercio_id a las funciones reales de tools.py por detrás.
+    
+    def consultar_inventario(modelo: str = "") -> str:
+        """Busca un modelo de celular en el inventario de la tienda."""
+        return tools.consultar_inventario(modelo, comercio_id)
+
+    def consultar_horarios() -> str:
+        """Consulta los horarios de atención de la tienda."""
+        return tools.consultar_horarios(comercio_id)
+
+    def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int) -> str:
+        """Agenda una cita para un cliente en la tienda asociando el ID del celular."""
+        return tools.agendar_cita(cliente_nombre, telefono, fecha_turno, celular_id, comercio_id)
+
+
     instrucciones = """
     Eres el vendedor estrella de una tienda de celulares de alta gama.
 
@@ -20,7 +38,7 @@ def iniciar_agente():
     
     configuracion_ia = types.GenerateContentConfig(
         system_instruction=instrucciones,
-        tools=[consultar_inventario, consultar_horarios, agendar_cita],
+        tools=[consultar_inventario, consultar_horarios, agendar_cita], # ⬅️ Pasamos las funciones locales
         temperature=0.2, 
     )
     
