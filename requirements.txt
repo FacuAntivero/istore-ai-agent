@@ -5,3 +5,4 @@ supabase==2.30.0
 requests==2.33.1
 python-dotenv==1.2.2
 starlette==1.0.0
+dateparser==1.2.0
