@@ -29,6 +29,9 @@ sesiones_chat = {}
 mensajes_procesados = set()
 mensajes_pendientes = {}
 
+# Cache para mapear @lid → número real antes de procesar el mensaje
+lid_a_numero = {}
+
 EVOLUTION_API_URL = "https://evolution-api-production-8717.up.railway.app"
 API_KEY = "2977506C-B874-4465-AA51-F92A6F64DAD7"
 
@@ -70,6 +73,9 @@ def guardar_contacto(lid, numero, nombre, comercio_id):
         print(f"[Supabase] ❌ Error guardando contacto: {e}")
 
 def obtener_numero_real(lid, comercio_id):
+    # Primero revisar cache en memoria
+    if lid in lid_a_numero:
+        return lid_a_numero[lid]
     try:
         result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", comercio_id).execute()
         if result.data:
@@ -94,6 +100,22 @@ async def recibir_mensaje(request: Request):
     comercio_id = comercio["id"]
     evento = datos.get("event", "")
 
+    # Capturar número real desde contacts.upsert
+    if evento == "contacts.upsert":
+        try:
+            msg_data = datos.get("data", {})
+            contact_id = msg_data.get("id", "")
+            push_name = msg_data.get("pushName", "")
+            if contact_id.endswith("@s.whatsapp.net"):
+                # Buscar si hay algún lid pendiente que corresponda
+                for lid, numero in list(lid_a_numero.items()):
+                    if numero == contact_id:
+                        guardar_contacto(lid, contact_id, push_name, comercio_id)
+        except Exception as e:
+            print(f"[Sistema] Error en contacts.upsert: {e}")
+        return {"status": "ok"}
+
+    # Capturar número real desde send.message
     if evento == "send.message":
         try:
             msg_data = datos.get("data", {})
@@ -145,16 +167,26 @@ async def recibir_mensaje(request: Request):
                     return {"status": "ignorado", "motivo": "duplicado"}
                 mensajes_procesados.add(id_mensaje)
             else:
+                # Guardar en cache de memoria para cuando llegue contacts.upsert
+                lid_a_numero[remote_jid] = sender
                 mensajes_pendientes[id_mensaje] = {
                     "texto": texto_usuario,
                     "push_name": push_name,
                     "lid": remote_jid,
                     "comercio_id": comercio_id
                 }
+                print(f"[Sistema] ⏳ Esperando número real para {remote_jid}...")
                 await asyncio.sleep(2)
                 if id_mensaje in mensajes_pendientes:
                     pendiente = mensajes_pendientes.pop(id_mensaje)
-                    id_remitente = sender
+                    # Intentar obtener el número real una vez más
+                    numero_real = obtener_numero_real(remote_jid, comercio_id)
+                    if numero_real and numero_real != MI_NUMERO:
+                        id_remitente = numero_real
+                        print(f"[Sistema] ✅ Número resuelto tras espera: {id_remitente}")
+                    else:
+                        print(f"[Sistema] ⚠️ No se pudo resolver, mensaje descartado")
+                        return {"status": "ignorado", "motivo": "no se pudo resolver numero"}
                     texto_usuario = pendiente["texto"]
                     push_name = pendiente["push_name"]
                     mensajes_procesados.add(id_mensaje)
