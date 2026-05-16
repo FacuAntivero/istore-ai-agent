@@ -33,7 +33,7 @@ mensajes_pendientes = {}
 lid_a_numero = {}
 
 EVOLUTION_API_URL = "https://evolution-api-production-8717.up.railway.app"
-API_KEY = "2977506C-B874-4465-AA51-F92A6F64DAD7"
+API_KEY = "74BD7CFB-C38A-4143-833A-FCEA92FBBA21"
 
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
