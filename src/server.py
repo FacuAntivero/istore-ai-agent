@@ -29,9 +29,6 @@ sesiones_chat = {}
 mensajes_procesados = set()
 mensajes_pendientes = {}
 
-# Cache para mapear @lid → número real antes de procesar el mensaje
-lid_a_numero = {}
-
 EVOLUTION_API_URL = "https://evolution-api-production-4b88.up.railway.app"
 API_KEY = "74BD7CFB-C38A-4143-833A-FCEA92FBBA21"
 
@@ -56,11 +53,9 @@ MI_NUMERO = os.getenv("MI_NUMERO", "5492494600615@s.whatsapp.net")
 def guardar_contacto(lid, numero, nombre, comercio_id):
     try:
         if numero == MI_NUMERO:
-            print(f"[Supabase] ⚠️ Ignorando mapeo con número propio")
             return
         result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", comercio_id).execute()
         if result.data:
-            print(f"[Supabase] ℹ️ Contacto ya existe: {lid}")
             return
         supabase.table("contactos").insert({
             "lid": lid,
@@ -73,9 +68,6 @@ def guardar_contacto(lid, numero, nombre, comercio_id):
         print(f"[Supabase] ❌ Error guardando contacto: {e}")
 
 def obtener_numero_real(lid, comercio_id):
-    # Primero revisar cache en memoria
-    if lid in lid_a_numero:
-        return lid_a_numero[lid]
     try:
         result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", comercio_id).execute()
         if result.data:
@@ -100,33 +92,25 @@ async def recibir_mensaje(request: Request):
     comercio_id = comercio["id"]
     evento = datos.get("event", "")
 
-    # Capturar número real desde contacts.upsert
+    # 1. Atrapamos el mapeo real cuando WhatsApp lo revela
     if evento == "contacts.upsert":
         try:
-            msg_data = datos.get("data", {})
-            contact_id = msg_data.get("id", "")
-            push_name = msg_data.get("pushName", "")
-            if contact_id.endswith("@s.whatsapp.net"):
-                # Buscar si hay algún lid pendiente que corresponda
-                for lid, numero in list(lid_a_numero.items()):
-                    if numero == contact_id:
-                        guardar_contacto(lid, contact_id, push_name, comercio_id)
+            contactos_data = datos.get("data", [])
+            # Evolution puede mandar lista o dict
+            if isinstance(contactos_data, dict):
+                contactos_data = [contactos_data]
+                
+            for c in contactos_data:
+                c_id = c.get("id", "")
+                c_lid = c.get("lid", "")
+                c_name = c.get("pushName", "")
+                if c_id.endswith("@s.whatsapp.net") and c_lid.endswith("@lid"):
+                    guardar_contacto(c_lid, c_id, c_name, comercio_id)
         except Exception as e:
             print(f"[Sistema] Error en contacts.upsert: {e}")
         return {"status": "ok"}
 
-    # Capturar número real desde send.message
     if evento == "send.message":
-        try:
-            msg_data = datos.get("data", {})
-            context_info = msg_data.get("contextInfo", {})
-            lid = context_info.get("participant", "")
-            numero_real = msg_data.get("key", {}).get("remoteJid", "")
-            if lid.endswith("@lid") and numero_real.endswith("@s.whatsapp.net"):
-                guardar_contacto(lid, numero_real, "", comercio_id)
-                print(f"[Sistema] 📝 Mapeado automático: {lid} → {numero_real}")
-        except Exception as e:
-            print(f"[Sistema] Error en mapeo automático: {e}")
         return {"status": "ok"}
 
     try:
@@ -138,12 +122,11 @@ async def recibir_mensaje(request: Request):
 
         remote_jid = key.get("remoteJid", "")
         id_mensaje = key.get("id", "")
-        sender = datos.get("sender", "")
         push_name = mensaje_data.get("pushName", "")
 
-        # 1. FILTRO DE SEGURIDAD ABSOLUTO: Si es un grupo, se aborta el flujo inmediatamente.
+        # Filtro de grupos
         if remote_jid.endswith("@g.us"):
-            print(f"[Sistema] 👥 Mensaje de grupo ignorado de forma segura ({remote_jid})")
+            print(f"[Sistema] 👥 Mensaje de grupo ignorado")
             return {"status": "ignorado", "motivo": "mensaje de grupo"}
 
         msg_content = mensaje_data.get("message", {})
@@ -154,18 +137,14 @@ async def recibir_mensaje(request: Request):
         else:
             return {"status": "ignorado", "motivo": "no es texto"}
 
-        # 2. Procesamos chats privados con números normales agendados/vistos antes
+        # Procesar Chats Agendados
         if remote_jid.endswith("@s.whatsapp.net"):
             id_remitente = remote_jid
-            if id_mensaje in mensajes_pendientes:
-                pendiente = mensajes_pendientes.pop(id_mensaje)
-                texto_usuario = pendiente["texto"]
-                push_name = pendiente["push_name"]
             if id_mensaje in mensajes_procesados:
                 return {"status": "ignorado", "motivo": "duplicado"}
             mensajes_procesados.add(id_mensaje)
 
-        # 3. Procesamos usuarios no agendados (LID) usando la inteligencia de Evolution V2
+        # Procesar Chats NO Agendados (@lid)
         elif remote_jid.endswith("@lid"):
             numero_guardado = obtener_numero_real(remote_jid, comercio_id)
             if numero_guardado:
@@ -174,18 +153,30 @@ async def recibir_mensaje(request: Request):
                     return {"status": "ignorado", "motivo": "duplicado"}
                 mensajes_procesados.add(id_mensaje)
             else:
-                # ¡Magia de V2! El número real del emisor directo viene escondido en 'sender'
-                if sender and sender.endswith("@s.whatsapp.net"):
-                    print(f"[Sistema] 🚀 ¡Número resuelto al instante por V2!: {sender}")
-                    guardar_contacto(remote_jid, sender, push_name, comercio_id)
-                    id_remitente = sender
+                # Ponemos el mensaje en espera un par de segundos
+                mensajes_pendientes[id_mensaje] = {
+                    "texto": texto_usuario,
+                    "push_name": push_name
+                }
+                print(f"[Sistema] ⏳ Esperando mapeo de WhatsApp para el nuevo cliente...")
+                await asyncio.sleep(2.5)
+                
+                if id_mensaje in mensajes_pendientes:
+                    pendiente = mensajes_pendientes.pop(id_mensaje)
+                    numero_real = obtener_numero_real(remote_jid, comercio_id)
                     
-                    if id_mensaje in mensajes_procesados:
-                        return {"status": "ignorado", "motivo": "duplicado"}
+                    if numero_real and numero_real != MI_NUMERO:
+                        id_remitente = numero_real
+                        print(f"[Sistema] ✅ ¡Mapeo completado!: {id_remitente}")
+                    else:
+                        print(f"[Sistema] ⚠️ No se resolvió. Usando ruta @lid directa.")
+                        id_remitente = remote_jid # Evoluton V2 sabe entregar a @lid directos
+                        
+                    texto_usuario = pendiente["texto"]
+                    push_name = pendiente["push_name"]
                     mensajes_procesados.add(id_mensaje)
                 else:
-                    print(f"[Sistema] ⚠️ No vino el número real en el sender para el LID. Mensaje descartado.")
-                    return {"status": "ignorado", "motivo": "no se pudo resolver numero"}
+                    return {"status": "procesado en paralelo"}
         else:
             id_remitente = remote_jid
 
@@ -214,11 +205,9 @@ async def recibir_mensaje(request: Request):
         print(f"[Error API] {e.message}")
         enviar_mensaje_whatsapp(id_remitente, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, id_mensaje, remote_jid)
         return {"status": "error"}
-
     except Exception as e:
         print(f"[Error Inesperado] {str(e)}")
         raise HTTPException(status_code=500, detail="Error en servidor")
-
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}"
@@ -226,14 +215,10 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
-    
-    # Payload adaptado estrictamente a Evolution API v2
     payload = {
         "number": numero_destino,
         "text": texto
     }
-    
-    # Si queremos responder citando el mensaje (quoted) en la v2
     if id_mensaje and remote_jid:
         payload["options"] = {
             "quoted": {
