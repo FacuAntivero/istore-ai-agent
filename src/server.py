@@ -32,7 +32,7 @@ mensajes_pendientes = {}
 # Cache para mapear @lid → número real antes de procesar el mensaje
 lid_a_numero = {}
 
-EVOLUTION_API_URL = "https://evolution-api-production-8717.up.railway.app"
+EVOLUTION_API_URL = "https://evolution-api-production-4b88.up.railway.app"
 API_KEY = "74BD7CFB-C38A-4143-833A-FCEA92FBBA21"
 
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
