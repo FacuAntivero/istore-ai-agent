@@ -167,31 +167,18 @@ async def recibir_mensaje(request: Request):
                     return {"status": "ignorado", "motivo": "duplicado"}
                 mensajes_procesados.add(id_mensaje)
             else:
-                # Guardar en cache de memoria para cuando llegue contacts.upsert
-                lid_a_numero[remote_jid] = sender
-                mensajes_pendientes[id_mensaje] = {
-                    "texto": texto_usuario,
-                    "push_name": push_name,
-                    "lid": remote_jid,
-                    "comercio_id": comercio_id
-                }
-                print(f"[Sistema] ⏳ Esperando número real para {remote_jid}...")
-                await asyncio.sleep(2)
-                if id_mensaje in mensajes_pendientes:
-                    pendiente = mensajes_pendientes.pop(id_mensaje)
-                    # Intentar obtener el número real una vez más
-                    numero_real = obtener_numero_real(remote_jid, comercio_id)
-                    if numero_real and numero_real != MI_NUMERO:
-                        id_remitente = numero_real
-                        print(f"[Sistema] ✅ Número resuelto tras espera: {id_remitente}")
-                    else:
-                        print(f"[Sistema] ⚠️ No se pudo resolver, mensaje descartado")
-                        return {"status": "ignorado", "motivo": "no se pudo resolver numero"}
-                    texto_usuario = pendiente["texto"]
-                    push_name = pendiente["push_name"]
+                # ¡MAGIA DE LA V2! El número real ya viene escondido en el 'sender'
+                if sender and sender.endswith("@s.whatsapp.net"):
+                    print(f"[Sistema] 🚀 ¡Número resuelto al instante por V2!: {sender}")
+                    guardar_contacto(remote_jid, sender, push_name, comercio_id)
+                    id_remitente = sender
+                    
+                    if id_mensaje in mensajes_procesados:
+                        return {"status": "ignorado", "motivo": "duplicado"}
                     mensajes_procesados.add(id_mensaje)
                 else:
-                    return {"status": "procesado por segundo webhook"}
+                    print(f"[Sistema] ⚠️ No vino el número real en el sender. Mensaje descartado.")
+                    return {"status": "ignorado", "motivo": "no se pudo resolver numero"}
         else:
             id_remitente = remote_jid
 
