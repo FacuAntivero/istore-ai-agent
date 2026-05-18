@@ -68,10 +68,14 @@ def guardar_contacto(lid, numero, nombre, comercio_id):
         print(f"[Supabase] ❌ Error guardando contacto: {e}")
 
 def obtener_numero_real(lid, comercio_id):
+    print(f"[Supabase] 🔍 Buscando mapeo para LID: '{lid}' | Comercio: {comercio_id}")
     try:
         result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", comercio_id).execute()
         if result.data:
+            print(f"[Supabase] 🎯 ¡Mapeo encontrado en DB!: {result.data[0]['numero']}")
             return result.data[0]["numero"]
+        else:
+            print(f"[Supabase] ❌ No se encontró el LID en la base de datos.")
     except Exception as e:
         print(f"[Supabase] ❌ Error buscando contacto: {e}")
     return None
@@ -79,6 +83,15 @@ def obtener_numero_real(lid, comercio_id):
 @app.post("/webhook")
 async def recibir_mensaje(request: Request):
     datos = await request.json()
+
+    # ==========================================
+    # 🕵️ LOG MAESTRO: VEMOS TODO LO QUE LLEGA
+    # ==========================================
+    evento_actual = datos.get("event", "SIN_EVENTO")
+    print("\n" + "="*50)
+    print(f"📦 [WEBHOOK] EVENTO RECIBIDO: {evento_actual}")
+    print(json.dumps(datos, indent=2))
+    print("="*50 + "\n")
 
     instance_name = datos.get("instance")
     if not instance_name:
@@ -90,13 +103,11 @@ async def recibir_mensaje(request: Request):
         return {"status": "error", "motivo": "Comercio no encontrado"}
 
     comercio_id = comercio["id"]
-    evento = datos.get("event", "")
 
     # 1. Atrapamos el mapeo real cuando WhatsApp lo revela
-    if evento == "contacts.upsert":
+    if evento_actual == "contacts.upsert":
         try:
             contactos_data = datos.get("data", [])
-            # Evolution puede mandar lista o dict
             if isinstance(contactos_data, dict):
                 contactos_data = [contactos_data]
                 
@@ -110,7 +121,7 @@ async def recibir_mensaje(request: Request):
             print(f"[Sistema] Error en contacts.upsert: {e}")
         return {"status": "ok"}
 
-    if evento == "send.message":
+    if evento_actual == "send.message":
         return {"status": "ok"}
 
     try:
@@ -170,7 +181,7 @@ async def recibir_mensaje(request: Request):
                         print(f"[Sistema] ✅ ¡Mapeo completado!: {id_remitente}")
                     else:
                         print(f"[Sistema] ⚠️ No se resolvió. Usando ruta @lid directa.")
-                        id_remitente = remote_jid # Evoluton V2 sabe entregar a @lid directos
+                        id_remitente = remote_jid 
                         
                     texto_usuario = pendiente["texto"]
                     push_name = pendiente["push_name"]
