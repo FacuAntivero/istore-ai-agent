@@ -214,26 +214,33 @@ async def recibir_mensaje(request: Request):
 
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
+    # En la v2 el endpoint recomendado es /message/sendText
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
+    
+    # Payload adaptado estrictamente a Evolution API v2
     payload = {
         "number": numero_destino,
-        "textMessage": {"text": texto},
-        "options": {}
+        "text": texto
     }
+    
+    # Si queremos responder citando el mensaje (quoted) en la v2
     if id_mensaje and remote_jid:
-        payload["options"]["quoted"] = {
-            "key": {
-                "id": id_mensaje,
-                "remoteJid": remote_jid,
-                "fromMe": False
+        payload["options"] = {
+            "quoted": {
+                "key": {
+                    "id": id_mensaje,
+                    "remoteJid": remote_jid,
+                    "fromMe": False
+                }
             }
         }
+        
     respuesta = requests.post(url, headers=headers, json=payload)
     if respuesta.status_code in [200, 201]:
-        print("✅ Mensaje entregado")
+        print("✅ Mensaje entregado con éxito por V2")
     else:
         print(f"❌ Error al enviar: {respuesta.text}")
