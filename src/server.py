@@ -141,6 +141,11 @@ async def recibir_mensaje(request: Request):
         sender = datos.get("sender", "")
         push_name = mensaje_data.get("pushName", "")
 
+        # 1. FILTRO DE SEGURIDAD ABSOLUTO: Si es un grupo, se aborta el flujo inmediatamente.
+        if remote_jid.endswith("@g.us"):
+            print(f"[Sistema] 👥 Mensaje de grupo ignorado de forma segura ({remote_jid})")
+            return {"status": "ignorado", "motivo": "mensaje de grupo"}
+
         msg_content = mensaje_data.get("message", {})
         if "conversation" in msg_content:
             texto_usuario = msg_content["conversation"]
@@ -149,6 +154,7 @@ async def recibir_mensaje(request: Request):
         else:
             return {"status": "ignorado", "motivo": "no es texto"}
 
+        # 2. Procesamos chats privados con números normales agendados/vistos antes
         if remote_jid.endswith("@s.whatsapp.net"):
             id_remitente = remote_jid
             if id_mensaje in mensajes_pendientes:
@@ -159,6 +165,7 @@ async def recibir_mensaje(request: Request):
                 return {"status": "ignorado", "motivo": "duplicado"}
             mensajes_procesados.add(id_mensaje)
 
+        # 3. Procesamos usuarios no agendados (LID) usando la inteligencia de Evolution V2
         elif remote_jid.endswith("@lid"):
             numero_guardado = obtener_numero_real(remote_jid, comercio_id)
             if numero_guardado:
@@ -167,7 +174,7 @@ async def recibir_mensaje(request: Request):
                     return {"status": "ignorado", "motivo": "duplicado"}
                 mensajes_procesados.add(id_mensaje)
             else:
-                # ¡MAGIA DE LA V2! El número real ya viene escondido en el 'sender'
+                # ¡Magia de V2! El número real del emisor directo viene escondido en 'sender'
                 if sender and sender.endswith("@s.whatsapp.net"):
                     print(f"[Sistema] 🚀 ¡Número resuelto al instante por V2!: {sender}")
                     guardar_contacto(remote_jid, sender, push_name, comercio_id)
@@ -177,7 +184,7 @@ async def recibir_mensaje(request: Request):
                         return {"status": "ignorado", "motivo": "duplicado"}
                     mensajes_procesados.add(id_mensaje)
                 else:
-                    print(f"[Sistema] ⚠️ No vino el número real en el sender. Mensaje descartado.")
+                    print(f"[Sistema] ⚠️ No vino el número real en el sender para el LID. Mensaje descartado.")
                     return {"status": "ignorado", "motivo": "no se pudo resolver numero"}
         else:
             id_remitente = remote_jid
@@ -214,7 +221,6 @@ async def recibir_mensaje(request: Request):
 
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    # En la v2 el endpoint recomendado es /message/sendText
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}"
     headers = {
         "apikey": API_KEY,
