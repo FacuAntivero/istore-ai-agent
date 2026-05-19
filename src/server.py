@@ -167,38 +167,18 @@ async def recibir_mensaje(request: Request):
 
         # Procesar Chats NO Agendados (@lid)
         elif remote_jid.endswith("@lid"):
-            # Al haberse ejecutado el bloque de arriba, esta consulta a Supabase va a ser instantánea y exitosa.
+            if id_mensaje in mensajes_procesados:
+                return {"status": "ignorado", "motivo": "duplicado"}
+            mensajes_procesados.add(id_mensaje)
+
+            # Buscamos si de casualidad ya lo tenemos mapeado
             numero_guardado = obtener_numero_real(remote_jid, comercio_id)
             if numero_guardado:
                 id_remitente = numero_guardado
-                if id_mensaje in mensajes_procesados:
-                    return {"status": "ignorado", "motivo": "duplicado"}
-                mensajes_procesados.add(id_mensaje)
             else:
-                # Sistema de respaldo por si el mensaje no trajo el campo 'sender' por algún motivo extraño
-                mensajes_pendientes[id_mensaje] = {
-                    "texto": texto_usuario,
-                    "push_name": push_name
-                }
-                print(f"[Sistema] ⏳ Esperando mapeo de WhatsApp para el nuevo cliente...")
-                await asyncio.sleep(2.5)
-                
-                if id_mensaje in mensajes_pendientes:
-                    pendiente = mensajes_pendientes.pop(id_mensaje)
-                    numero_real = obtener_numero_real(remote_jid, comercio_id)
-                    
-                    if numero_real and numero_real != MI_NUMERO:
-                        id_remitente = numero_real
-                        print(f"[Sistema] ✅ ¡Mapeo completado en fallback!: {id_remitente}")
-                    else:
-                        print(f"[Sistema] ⚠️ No se resolvió en fallback. Usando ruta @lid directa.")
-                        id_remitente = remote_jid 
-                        
-                    texto_usuario = pendiente["texto"]
-                    push_name = pendiente["push_name"]
-                    mensajes_procesados.add(id_mensaje)
-                else:
-                    return {"status": "procesado en paralelo"}
+                # ⚡ Sin esperas: Usamos la ruta @lid directa de forma instantánea
+                print(f"[Sistema] ⚡ Sin mapeo en DB. Usando ruta @lid directa de forma instantánea.")
+                id_remitente = remote_jid
         else:
             id_remitente = remote_jid
 
@@ -232,13 +212,13 @@ async def recibir_mensaje(request: Request):
         raise HTTPException(status_code=500, detail="Error en servidor")
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}"
+    # 🔥 El secreto: Pasamos ?checkNumber=false en la URL para forzar a Evolution a saltarse la validación
+    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
     
-    # 🔥 El secreto: forzamos el envío saltando la validación onWhatsApp
     options = {
         "checkNumber": False
     }
@@ -255,7 +235,7 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
     payload = {
         "number": numero_destino,
         "text": texto,
-        "checkNumber": False,  # Lo ponemos también en la raíz por compatibilidad de versiones v2
+        "checkNumber": False,  # Redundancia de seguridad
         "options": options
     }
         
