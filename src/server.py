@@ -63,7 +63,7 @@ def guardar_contacto(lid, numero, nombre, comercio_id):
             "nombre": nombre,
             "comercio_id": comercio_id
         }).execute()
-        print(f"[Supabase] ✅ Contacto guardado: {lid} → {numero}")
+        print(f"[Supabase] ✅ Contacto guardado con éxito: {lid} → {numero}")
     except Exception as e:
         print(f"[Supabase] ❌ Error guardando contacto: {e}")
 
@@ -104,7 +104,7 @@ async def recibir_mensaje(request: Request):
 
     comercio_id = comercio["id"]
 
-    # 1. Atrapamos el mapeo real cuando WhatsApp lo revela
+    # 1. Atrapamos el mapeo real cuando WhatsApp lo revela de forma estática
     if evento_actual == "contacts.upsert":
         try:
             contactos_data = datos.get("data", [])
@@ -134,6 +134,7 @@ async def recibir_mensaje(request: Request):
         remote_jid = key.get("remoteJid", "")
         id_mensaje = key.get("id", "")
         push_name = mensaje_data.get("pushName", "")
+        sender = mensaje_data.get("sender", "")  # 🌟 Agregamos la extracción del sender real
 
         # Filtro de grupos
         if remote_jid.endswith("@g.us"):
@@ -148,6 +149,15 @@ async def recibir_mensaje(request: Request):
         else:
             return {"status": "ignorado", "motivo": "no es texto"}
 
+        # ====================================================================
+        # 🔥 EL SANTO GRIAL: AUTO-MAPEO EN VIVO (Mesa de Entrada)
+        # ====================================================================
+        if remote_jid.endswith("@lid") and sender.endswith("@s.whatsapp.net"):
+            print(f"🔥 [Auto-Mapeo Webhook] ¡Atrapé un LID en vivo en un mensaje entrante!")
+            print(f"   Mapeando de inmediato: {remote_jid} ➡️ {sender}")
+            guardar_contacto(remote_jid, sender, push_name, comercio_id)
+        # ====================================================================
+
         # Procesar Chats Agendados
         if remote_jid.endswith("@s.whatsapp.net"):
             id_remitente = remote_jid
@@ -157,6 +167,7 @@ async def recibir_mensaje(request: Request):
 
         # Procesar Chats NO Agendados (@lid)
         elif remote_jid.endswith("@lid"):
+            # Al haberse ejecutado el bloque de arriba, esta consulta a Supabase va a ser instantánea y exitosa.
             numero_guardado = obtener_numero_real(remote_jid, comercio_id)
             if numero_guardado:
                 id_remitente = numero_guardado
@@ -164,7 +175,7 @@ async def recibir_mensaje(request: Request):
                     return {"status": "ignorado", "motivo": "duplicado"}
                 mensajes_procesados.add(id_mensaje)
             else:
-                # Ponemos el mensaje en espera un par de segundos
+                # Sistema de respaldo por si el mensaje no trajo el campo 'sender' por algún motivo extraño
                 mensajes_pendientes[id_mensaje] = {
                     "texto": texto_usuario,
                     "push_name": push_name
@@ -178,9 +189,9 @@ async def recibir_mensaje(request: Request):
                     
                     if numero_real and numero_real != MI_NUMERO:
                         id_remitente = numero_real
-                        print(f"[Sistema] ✅ ¡Mapeo completado!: {id_remitente}")
+                        print(f"[Sistema] ✅ ¡Mapeo completado en fallback!: {id_remitente}")
                     else:
-                        print(f"[Sistema] ⚠️ No se resolvió. Usando ruta @lid directa.")
+                        print(f"[Sistema] ⚠️ No se resolvió en fallback. Usando ruta @lid directa.")
                         id_remitente = remote_jid 
                         
                     texto_usuario = pendiente["texto"]
@@ -243,6 +254,6 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
         
     respuesta = requests.post(url, headers=headers, json=payload)
     if respuesta.status_code in [200, 201]:
-        print("✅ Mensaje entregado con éxito por V2")
+        print("✅ Mensaje entregado con éxito por Evolution API v2")
     else:
         print(f"❌ Error al enviar: {respuesta.text}")
