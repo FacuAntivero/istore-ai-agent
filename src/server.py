@@ -237,20 +237,27 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
-    payload = {
-        "number": numero_destino,
-        "text": texto
+    
+    # 🔥 El secreto: forzamos el envío saltando la validación onWhatsApp
+    options = {
+        "checkNumber": False
     }
+
     if id_mensaje and remote_jid:
-        payload["options"] = {
-            "quoted": {
-                "key": {
-                    "id": id_mensaje,
-                    "remoteJid": remote_jid,
-                    "fromMe": False
-                }
+        options["quoted"] = {
+            "key": {
+                "id": id_mensaje,
+                "remoteJid": remote_jid,
+                "fromMe": False
             }
         }
+
+    payload = {
+        "number": numero_destino,
+        "text": texto,
+        "checkNumber": False,  # Lo ponemos también en la raíz por compatibilidad de versiones v2
+        "options": options
+    }
         
     respuesta = requests.post(url, headers=headers, json=payload)
     if respuesta.status_code in [200, 201]:
