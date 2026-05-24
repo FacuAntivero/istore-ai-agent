@@ -192,7 +192,7 @@ async def recibir_mensaje(request: Request):
 
     if session_key not in sesiones_chat:
         print(f"[Sistema] 🆕 Nueva sesión: {session_key}")
-        sesiones_chat[session_key] = iniciar_agente(comercio_id)
+        sesiones_chat[session_key] = iniciar_agente(comercio_id, id_remitente)
 
     chat_actual = sesiones_chat[session_key]
 
