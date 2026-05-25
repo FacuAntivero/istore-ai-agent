@@ -4,11 +4,11 @@ import requests
 from database import supabase
 
 def consultar_inventario(modelo_corregido: str, comercio_id: str) -> str:
-    """Busca stock de un celular."""
+    """Busca stock de un celular devolviendo todos sus atributos útiles."""
     print(f"\n[Sistema] 🔍 Buscando en BD: {modelo_corregido} - Comercio: {comercio_id}")
     try:
         response = supabase.table("inventario_celulares") \
-            .select("*") \
+            .select("id, modelo, almacenamiento, condicion, bateria, precio") \
             .eq("comercio_id", comercio_id) \
             .ilike("modelo", f"%{modelo_corregido}%") \
             .eq("estado_venta", "disponible") \
@@ -16,6 +16,8 @@ def consultar_inventario(modelo_corregido: str, comercio_id: str) -> str:
         datos = response.data
         if not datos:
             return f"No hay stock disponible para: {modelo_corregido}."
+        
+        # Devolvemos el string detallado para que la IA disponga de los datos estructurados
         return str(datos)
     except Exception as e:
         return f"Error al consultar la BD: {str(e)}"
@@ -37,25 +39,30 @@ def consultar_horarios(comercio_id: str) -> str:
         for h in datos:
             apertura = h['hora_apertura'][:5] if h['hora_apertura'] else '—'
             cierre = h['hora_cierre'][:5] if h['hora_cierre'] else '—'
-            # Le sacamos el asterisco rebelde
             resultado += f"- {h['dia_semana']}: de {apertura} a {cierre}\n"
         return resultado
     except Exception as e:
         return f"Error al consultar horarios: {str(e)}"
 
-def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int, comercio_id: str) -> str:
-    """Agenda o modifica una cita (si el teléfono ya tiene un turno previo)."""
-    print(f"\n[Sistema] 📅 Procesando cita: {cliente_nombre} ({telefono}) - Fecha: '{fecha_turno}'")
+def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int = None, comercio_id: str = None) -> str:
+    """Agenda o modifica una cita con alta tolerancia a parámetros nulos o fallos de red."""
+    print(f"\n[Sistema] 📅 Ejecutando agendar_cita: {cliente_nombre} ({telefono}) - Fecha recibida: '{fecha_turno}' - Celular ID: {celular_id}")
     try:
+        # Sanitizar celular_id por si Gemini pasa un string o 0
+        try:
+            celular_id = int(celular_id) if celular_id and int(celular_id) > 0 else None
+        except ValueError:
+            celular_id = None
+
         settings = {'PREFER_DATES_FROM': 'future', 'TIMEZONE': 'America/Argentina/Buenos_Aires'}
         fecha_objetivo = dateparser.parse(fecha_turno, languages=['es'], settings=settings)
 
         if not fecha_objetivo:
-            return f"No pude entender bien la fecha '{fecha_turno}'. Por favor decime el día y la hora exactos."
+            return f"Error técnico: No se pudo formatear la fecha '{fecha_turno}'. Por favor, pídele al usuario que repita fecha y hora de forma simple."
 
         fecha_iso = fecha_objetivo.strftime("%Y-%m-%d %H:%M:%S")
 
-        # 1. Chequeamos si este cliente (por teléfono) ya tiene un turno en este comercio
+        # Verificar si ya existe un turno previo para este cliente en el comercio
         turno_existente = supabase.table("turnos_clientes") \
             .select("*") \
             .eq("telefono", telefono) \
@@ -63,33 +70,33 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
             .execute()
 
         if turno_existente.data:
-            # 🔄 ES UNA MODIFICACIÓN DE TURNO
+            # 🔄 MODIFICACIÓN DE TURNO
             turno_viejo = turno_existente.data[0]
             viejo_celular_id = turno_viejo.get("celular_id")
 
-            # Si el cliente cambió de celular elegido
+            # Si el cliente cambió de equipo seleccionado, liberamos el viejo y reservamos el nuevo
             if viejo_celular_id and viejo_celular_id != celular_id:
                 print(f"[Sistema] 🔄 Liberando celular anterior: ID {viejo_celular_id}")
                 supabase.table("inventario_celulares").update({"estado_venta": "disponible"}).eq("id", viejo_celular_id).execute()
                 
-                if celular_id:
-                    print(f"[Sistema] 🔒 Reservando nuevo celular: ID {celular_id}")
-                    supabase.table("inventario_celulares").update({"estado_venta": "pendiente"}).eq("id", celular_id).execute()
+            if celular_id:
+                print(f"[Sistema] 🔒 Reservando nuevo celular: ID {celular_id}")
+                supabase.table("inventario_celulares").update({"estado_venta": "pendiente"}).eq("id", celular_id).execute()
                         
-            # Actualizamos la cita existente con los nuevos datos
             update_payload = {
                 "cliente_nombre": cliente_nombre,
                 "fecha_turno": fecha_iso,
                 "celular_id": celular_id
             }
             supabase.table("turnos_clientes").update(update_payload).eq("id", turno_viejo["id"]).execute()
-            print(f"[Sistema] ✏️ Turno ID {turno_viejo['id']} actualizado con éxito.")
+            print(f"[Sistema] ✏️ Turno ID {turno_viejo['id']} actualizado correctamente en Supabase.")
 
-            return f"¡Cita modificada! Agendado para el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')}."
+            return f"¡Cita modificada! Quedaste agendado para el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')}."
 
         else:
-            # 🆕 ES UN TURNO NUEVO
+            # 🆕 TURNO NUEVO
             if celular_id:
+                print(f"[Sistema] 🔒 Pasando celular ID {celular_id} a estado 'pendiente'...")
                 supabase.table("inventario_celulares").update({"estado_venta": "pendiente"}).eq("id", celular_id).execute()
 
             insert_payload = {
@@ -100,13 +107,13 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
                 "fecha_turno": fecha_iso
             }
             supabase.table("turnos_clientes").insert(insert_payload).execute()
-            print(f"[Sistema] 📅 Turno nuevo insertado con éxito.")
+            print(f"[Sistema] 📅 Nuevo registro insertado en tabla turnos_clientes exitosamente.")
 
-            return f"¡Cita agendada! Te esperamos el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')}."
+            return f"¡Perfecto! Tu cita quedó agendada para el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')} hs. ¡Te esperamos!"
 
     except Exception as e:
-        print(f"[Sistema] ❌ Error en agendar_cita: {str(e)}")
-        return f"Error al procesar la cita: {str(e)}"
+        print(f"[Sistema] ❌ Error crítico en agendar_cita: {str(e)}")
+        return f"Disculpa, tuvimos una interrupción en nuestra base de datos. Podrías confirmar si estás de acuerdo con el turno para reintentar la carga?"
     
 def obtener_configuracion_comercio(comercio_id: int) -> dict:
     """Trae las políticas personalizadas del comercio desde la base de datos."""
@@ -133,7 +140,6 @@ def solicitar_asistencia_humana(motivo: str, telefono_cliente: str, comercio_id:
     """Envía un WhatsApp de alerta al dueño del comercio notificándole que se requiere su atención."""
     print(f"\n[Sistema] 🚨 Solicitando asistencia humana para Comercio ID: {comercio_id}. Motivo: {motivo}")
     try:
-        # 1. Obtenemos los datos de configuración de la tienda y su instancia de Evolution
         config_res = supabase.table("configuracion_comercios").select("telefono_dueno").eq("comercio_id", comercio_id).execute()
         comercio_res = supabase.table("comercios").select("evolution_instance").eq("id", comercio_id).execute()
         
@@ -145,18 +151,14 @@ def solicitar_asistencia_humana(motivo: str, telefono_cliente: str, comercio_id:
 
         telefono_dueno = config_res.data[0]["telefono_dueno"]
         instance_name = comercio_res.data[0]["evolution_instance"]
-        
-        # Limpiamos el JID del cliente para dejar solo el número
         cliente_numero_limpio = telefono_cliente.split("@")[0]
 
-        # 2. Diseñamos el mensaje de alerta para el dueño (Formato directo y conciso)
         texto_alerta = (
             f"🚨 *Intervención requerida*\n\n"
             f"📱 *Número:* {cliente_numero_limpio}\n"
             f"📌 *Motivo:* {motivo}"
         )
 
-        # 3. Enviamos el mensaje usando la Evolution API configurada
         EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "https://evolution-api-production-4b88.up.railway.app")
         API_KEY = os.getenv("EVOLUTION_API_KEY", "74BD7CFB-C38A-4143-833A-FCEA92FBBA21")
         
