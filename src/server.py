@@ -48,7 +48,8 @@ def obtener_comercio(instancia):
     if instancia in CACHE_COMERCIOS:
         return CACHE_COMERCIOS[instancia]
     try:
-        res = supabase.table("comercios").select("*").eq("evolution_instance", instancia).execute()
+        # 💡 Cambiamos .eq por .ilike para que ignore mayúsculas/minúsculas
+        res = supabase.table("comercios").select("*").ilike("evolution_instance", instancia).execute()
         if res.data:
             CACHE_COMERCIOS[instancia] = res.data[0]
             return res.data[0]
