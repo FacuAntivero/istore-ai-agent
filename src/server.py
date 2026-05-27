@@ -261,6 +261,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         # 🔥 NUEVA LÓGICA: BÚSQUEDA AGRESIVA DEL NÚMERO REAL
         id_remitente = remote_jid
         print(f"[Debug] remote_jid={remote_jid} | sender={sender} | participant={participant}")
+        
         if remote_jid.endswith("@lid"):
             if participant and participant.endswith("@s.whatsapp.net"):
                 id_remitente = participant
@@ -270,7 +271,13 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 numero_guardado = obtener_numero_real(remote_jid, comercio_id)
                 if numero_guardado: 
                     id_remitente = numero_guardado
+            
+            # 🛡️ LA DEFENSA DEFINITIVA (Agrega este bloque)
+            if id_remitente.endswith("@lid"):
+                print(f"🛡️ [Ignorado] Mensaje de {push_name} ({remote_jid}) descartado. WhatsApp ocultó el número real y Evolution API no permite responder a alias.")
+                return {"status": "ignorado"}
 
+        # (A partir de aquí sigue tu código normal)
         if id_remitente not in buffer_mensajes:
             buffer_mensajes[id_remitente] = []
         
