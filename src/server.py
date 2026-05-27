@@ -248,6 +248,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
         # 🔥 NUEVA LÓGICA: BÚSQUEDA AGRESIVA DEL NÚMERO REAL
         id_remitente = remote_jid
+        print(f"[Debug] remote_jid={remote_jid} | sender={sender} | participant={participant}")
         if remote_jid.endswith("@lid"):
             if participant and participant.endswith("@s.whatsapp.net"):
                 id_remitente = participant
