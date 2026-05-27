@@ -167,24 +167,21 @@ async def procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, rem
         if activar_delay_humano:
             simular_escribiendo(id_remitente, instance_name, encendido=True)
             
-            # 🔥 NUEVO CÁLCULO DE DELAY (Más seguro contra baneos)
-            tiempo_lectura = random.uniform(2.0, 4.0) # Base mínima de lectura
-            tiempo_tipeo = max(len(texto_respuesta) * 0.03, 3.5) # Al menos 3.5 segs escribiendo
+            tiempo_lectura = random.uniform(2.0, 4.0)
+            tiempo_tipeo = max(len(texto_respuesta) * 0.03, 3.5)
             delay_total = round(tiempo_lectura + tiempo_tipeo, 1)
-            
-            # Limitamos el máximo a 10 segundos para no frustrar al cliente
             delay_total = min(delay_total, 10.0) 
             
             await asyncio.sleep(delay_total)
             simular_escribiendo(id_remitente, instance_name, encendido=False)
 
-        # 🔥 AHORA ENVIAMOS LA RESPUESTA AL remote_jid ORIGINAL (Que puede ser un alias)
-        # Esto es vital. WhatsApp Web / Evolution necesitan el JID original del chat para contestar.
-        enviar_mensaje_whatsapp(remote_jid, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid)
+        # 🔥 CAMBIO AQUÍ: El primer parámetro es id_remitente
+        enviar_mensaje_whatsapp(id_remitente, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid)
 
     except errors.APIError as e:
         print(f"[Error API Gemini] {e.message}")
-        enviar_mensaje_whatsapp(remote_jid, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid)
+        # 🔥 CAMBIO AQUÍ TAMBIÉN: El primer parámetro es id_remitente
+        enviar_mensaje_whatsapp(id_remitente, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid)
     except Exception as e:
         print(f"[Error Inesperado] {str(e)}")
 
@@ -264,7 +261,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         push_name = mensaje_data.get("pushName", "")
         
         # 🔥 EL CAMBIO CLAVE ESTÁ AQUÍ. Buscamos el sender principal en la raíz.
-        sender = datos.get("sender", mensaje_data.get("sender", ""))
+        sender = mensaje_data.get("sender", "")
         participant = key.get("participant", "")
 
         if remote_jid.endswith("@g.us") or remote_jid == "status@broadcast":
