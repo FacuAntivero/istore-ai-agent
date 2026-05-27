@@ -181,6 +181,12 @@ def extraer_texto_mensaje(msg_object):
 @app.post("/webhook")
 async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
     datos = await request.json()
+    
+    # 🔥 EL DEBUG DEFINITIVO
+    print("\n--- INICIO JSON WEBHOOK ---")
+    print(json.dumps(datos, indent=2))
+    print("--- FIN JSON WEBHOOK ---\n")
+    
     evento_actual = datos.get("event", "SIN_EVENTO")
     instance_name = datos.get("instance")
     
@@ -239,7 +245,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         if not texto_usuario:
             return {"status": "ignorado"}
 
-        if remote_jid.endswith("@lid") and sender.endswith("@s.whatsapp.net"):
+        if remote_jid.endswith("@lid") and sender and sender.endswith("@s.whatsapp.net"):
             guardar_contacto(remote_jid, sender, push_name, comercio_id)
 
         if id_mensaje in mensajes_procesados:
