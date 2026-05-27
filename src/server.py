@@ -70,25 +70,38 @@ def guardar_contacto(lid, numero, nombre, comercio_id):
             "nombre": nombre,
             "comercio_id": comercio_id
         }).execute()
-        print(f"[Supabase] ✅ Contacto guardado con éxito: {lid} → {numero}")
+        print(f"[Supabase] ✅ Contacto guardado con éxito: {lid} → {numero} (Comercio ID: {comercio_id})")
     except Exception as e:
         print(f"[Supabase] ❌ Error guardando contacto: {e}")
 
-def obtener_numero_real(lid, comercio_id):
+def obtener_numero_real(lid, comercio_id, nombre_push=""):
     try:
-        # 🔥 Forzamos que el comercio_id sea un entero por si viene como texto
         id_limpio = int(comercio_id) if comercio_id is not None else None
         
-        print(f"[Supabase Debug] Buscando número real para LID: {lid} | comercio_id original: {comercio_id} (Tipo: {type(comercio_id)}) -> Usando: {id_limpio}")
+        # 🚀 OPTIMIZACIÓN SAAS: Una sola llamada a la DB para traer todo el historial global del LID
+        result = supabase.table("contactos").select("numero", "comercio_id", "nombre").eq("lid", lid).execute()
         
-        result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", id_limpio).execute()
+        if not result.data:
+            return None  # Totalmente desconocido en toda la plataforma
+            
+        # 🧠 Procesamos en memoria (Ultra rápido) para ver si ya pertenece al comercio actual
+        for contacto in result.data:
+            if contacto.get("comercio_id") == id_limpio:
+                return contacto["numero"]
         
-        print(f"[Supabase Debug] Resultado de la base de datos: {result.data}")
+        # Si llegó acá, el LID existe en otro comercio pero NO en el actual (Intersección de Clientes)
+        numero_real = result.data[0]["numero"]
+        nombre_cliente = nombre_push if nombre_push else result.data[0].get("nombre", "Cliente")
         
-        if result.data:
-            return result.data[0]["numero"]
+        print(f"[SaaS Link] 🔗 LID detectado en la red global. Vinculando número {numero_real} al comercio {id_limpio}")
+        
+        # Sincronizamos los datos creando la fila correspondiente para este comercio de manera aislada
+        guardar_contacto(lid, numero_real, nombre_cliente, id_limpio)
+        
+        return numero_real
+        
     except Exception as e:
-        print(f"[Supabase] ❌ Error buscando contacto: {e}")
+        print(f"[Supabase] ❌ Error en el motor de búsqueda global: {e}")
     return None
 
 def simular_escribiendo(numero_destino, instance_name, encendido=True):
@@ -105,14 +118,12 @@ def simular_escribiendo(numero_destino, instance_name, encendido=True):
         pass
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    # Mantenemos el bypass en la URL por compatibilidad
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
     
-    # 🔥 Forzamos el bypass de validación dentro de las opciones
     options = {
         "checkNumber": False
     }
@@ -122,7 +133,6 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
             "key": {"id": id_mensaje, "remoteJid": remote_jid, "fromMe": False}
         }
 
-    # 🔥 Forzamos el bypass también en la raíz del payload
     payload = {
         "number": numero_destino,
         "text": texto,
@@ -266,7 +276,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             return {"status": "ignorado"}
         mensajes_procesados.add(id_mensaje)
 
-        # 🔥 NUEVA LÓGICA: BÚSQUEDA AGRESIVA DEL NÚMERO REAL
+        # 🔥 BÚSQUEDA AGRESIVA DEL NÚMERO REAL
         id_remitente = remote_jid
         print(f"[Debug] remote_jid={remote_jid} | sender={sender} | participant={participant}")
         
@@ -276,16 +286,16 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             elif sender and sender.endswith("@s.whatsapp.net"):
                 id_remitente = sender
             else:
-                numero_guardado = obtener_numero_real(remote_jid, comercio_id)
+                # 🚀 Pasamos push_name para optimizar la vinculación si corresponde
+                numero_guardado = obtener_numero_real(remote_jid, comercio_id, push_name)
                 if numero_guardado: 
                     id_remitente = numero_guardado
             
-            # 🛡️ LA DEFENSA DEFINITIVA (Agrega este bloque)
+            # 🛡️ LA DEFENSA DEFINITIVA
             if id_remitente.endswith("@lid"):
                 print(f"🛡️ [Ignorado] Mensaje de {push_name} ({remote_jid}) descartado. WhatsApp ocultó el número real y Evolution API no permite responder a alias.")
                 return {"status": "ignorado"}
 
-        # (A partir de aquí sigue tu código normal)
         if id_remitente not in buffer_mensajes:
             buffer_mensajes[id_remitente] = []
         
