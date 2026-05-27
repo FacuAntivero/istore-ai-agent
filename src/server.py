@@ -190,7 +190,8 @@ async def procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, rem
         activar_delay_humano = os.getenv("SIMULATE_HUMAN_DELAY", "true").lower() == "true"
         
         if activar_delay_humano:
-            simular_escribiendo(id_remitente, instance_name, encendido=True)
+            # 🔥 USAMOS remote_jid PARA QUE EVOLUTION SEPA QUE ES UN @lid
+            simular_escribiendo(remote_jid, instance_name, encendido=True)
             
             tiempo_lectura = random.uniform(2.0, 4.0)
             tiempo_tipeo = max(len(texto_respuesta) * 0.03, 3.5)
@@ -198,15 +199,15 @@ async def procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, rem
             delay_total = min(delay_total, 10.0) 
             
             await asyncio.sleep(delay_total)
-            simular_escribiendo(id_remitente, instance_name, encendido=False)
+            simular_escribiendo(remote_jid, instance_name, encendido=False)
 
-        # 🔥 CAMBIO AQUÍ: El primer parámetro es id_remitente
-        enviar_mensaje_whatsapp(id_remitente, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid)
+        # 🔥 CAMBIO AQUÍ: Enviamos a remote_jid en lugar de id_remitente
+        enviar_mensaje_whatsapp(remote_jid, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid)
 
     except errors.APIError as e:
         print(f"[Error API Gemini] {e.message}")
-        # 🔥 CAMBIO AQUÍ TAMBIÉN: El primer parámetro es id_remitente
-        enviar_mensaje_whatsapp(id_remitente, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid)
+        # 🔥 CAMBIO AQUÍ TAMBIÉN
+        enviar_mensaje_whatsapp(remote_jid, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid)
     except Exception as e:
         print(f"[Error Inesperado] {str(e)}")
 
@@ -317,8 +318,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 numero_guardado = obtener_numero_real(remote_jid, comercio_id, push_name, instance_name)
                 if numero_guardado: 
                     id_remitente = numero_guardado
-            
-           
 
         # Limpiamos el número para que sea más fácil guardarlo y buscarlo
         id_remitente_limpio = id_remitente.split("@")[0]
