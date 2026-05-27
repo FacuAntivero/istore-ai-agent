@@ -1,40 +1,46 @@
 import dateparser
 import os
 import requests
+import json
 from database import supabase
 
-def consultar_inventario(modelo_corregido: str, comercio_id: str) -> str:
+def consultar_inventario(modelo_corregido: str, comercio_id: int, telefono_cliente: str) -> str:
     """Busca stock de un celular devolviendo todos sus atributos útiles."""
     print(f"\n[Sistema] 🔍 Buscando en BD: {modelo_corregido} - Comercio: {comercio_id}")
     try:
         response = supabase.table("inventario_celulares") \
-            .select("id, modelo, almacenamiento, condicion, bateria, precio") \
-            .eq("comercio_id", comercio_id) \
+            .select("id, modelo, capacidad, estado_estetico, bateria, precio") \
+            .eq("comercio_id", int(comercio_id)) \
             .ilike("modelo", f"%{modelo_corregido}%") \
             .eq("estado_venta", "disponible") \
             .execute()
+            
         datos = response.data
         if not datos:
-            return f"No hay stock disponible para: {modelo_corregido}."
+            return f"No hay stock disponible para la marca/modelo: {modelo_corregido}."
         
-        # Devolvemos el string detallado para que la IA disponga de los datos estructurados
-        return str(datos)
+        return json.dumps(datos)
+        
     except Exception as e:
-        return f"Error al consultar la BD: {str(e)}"
+        print(f"[Falla Crítica] ❌ Error en inventario: {e}")
+        # 🔥 Alerta automática interna al dueño para que no dependa de que la IA responda bien
+        solicitar_asistencia_humana("Falla técnica del servidor al intentar consultar el inventario.", telefono_cliente, comercio_id)
+        return "SISTEMA_DELAY: Hubo una interrupción temporal de conexión. Ya notificamos automáticamente a un asesor humano. Pídele disculpas al cliente de forma muy amable, sin tecnicismos, y dile que un compañero del local continuará el chat en instantes."
 
-def consultar_horarios(comercio_id: str) -> str:
+def consultar_horarios(comercio_id: int, telefono_cliente: str) -> str:
     """Consulta los horarios de atención de la tienda."""
     print(f"\n[Sistema] 🕐 Consultando horarios de atención - Comercio: {comercio_id}")
     try:
         response = supabase.table("horarios_atencion") \
             .select("*") \
-            .eq("comercio_id", comercio_id) \
+            .eq("comercio_id", int(comercio_id)) \
             .eq("activo", True) \
             .order("id") \
             .execute()
         datos = response.data
         if not datos:
-            return "No hay horarios de atención configurados."
+            return "No hay horarios de atención configurados en este momento."
+        
         resultado = "Nuestros horarios:\n"
         for h in datos:
             apertura = h['hora_apertura'][:5] if h['hora_apertura'] else '—'
@@ -42,13 +48,14 @@ def consultar_horarios(comercio_id: str) -> str:
             resultado += f"- {h['dia_semana']}: de {apertura} a {cierre}\n"
         return resultado
     except Exception as e:
-        return f"Error al consultar horarios: {str(e)}"
+        print(f"[Falla Crítica] ❌ Error en horarios: {e}")
+        solicitar_asistencia_humana("Falla técnica del servidor al intentar consultar los horarios.", telefono_cliente, comercio_id)
+        return "SISTEMA_DELAY: No se pudieron leer los horarios. Ya notificamos automáticamente a un asesor humano. Pídele disculpas al cliente de forma muy cercana y dile que un compañero del local lo atenderá enseguida."
 
-def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int = None, comercio_id: str = None) -> str:
+def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int = None, comercio_id: int = None) -> str:
     """Agenda o modifica una cita con alta tolerancia a parámetros nulos o fallos de red."""
-    print(f"\n[Sistema] 📅 Ejecutando agendar_cita: {cliente_nombre} ({telefono}) - Fecha recibida: '{fecha_turno}' - Celular ID: {celular_id}")
+    print(f"\n[Sistema] 📅 Ejecutando agendar_cita: {cliente_nombre} ({telefono}) - Fecha recibida: '{fecha_turno}'")
     try:
-        # Sanitizar celular_id por si Gemini pasa un string o 0
         try:
             celular_id = int(celular_id) if celular_id and int(celular_id) > 0 else None
         except ValueError:
@@ -62,25 +69,20 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
 
         fecha_iso = fecha_objetivo.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Verificar si ya existe un turno previo para este cliente en el comercio
         turno_existente = supabase.table("turnos_clientes") \
             .select("*") \
             .eq("telefono", telefono) \
-            .eq("comercio_id", comercio_id) \
+            .eq("comercio_id", int(comercio_id)) \
             .execute()
 
         if turno_existente.data:
-            # 🔄 MODIFICACIÓN DE TURNO
             turno_viejo = turno_existente.data[0]
             viejo_celular_id = turno_viejo.get("celular_id")
 
-            # Si el cliente cambió de equipo seleccionado, liberamos el viejo y reservamos el nuevo
             if viejo_celular_id and viejo_celular_id != celular_id:
-                print(f"[Sistema] 🔄 Liberando celular anterior: ID {viejo_celular_id}")
                 supabase.table("inventario_celulares").update({"estado_venta": "disponible"}).eq("id", viejo_celular_id).execute()
                 
             if celular_id:
-                print(f"[Sistema] 🔒 Reservando nuevo celular: ID {celular_id}")
                 supabase.table("inventario_celulares").update({"estado_venta": "pendiente"}).eq("id", celular_id).execute()
                         
             update_payload = {
@@ -89,38 +91,35 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
                 "celular_id": celular_id
             }
             supabase.table("turnos_clientes").update(update_payload).eq("id", turno_viejo["id"]).execute()
-            print(f"[Sistema] ✏️ Turno ID {turno_viejo['id']} actualizado correctamente en Supabase.")
 
             return f"¡Cita modificada! Quedaste agendado para el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')}."
 
         else:
-            # 🆕 TURNO NUEVO
             if celular_id:
-                print(f"[Sistema] 🔒 Pasando celular ID {celular_id} a estado 'pendiente'...")
                 supabase.table("inventario_celulares").update({"estado_venta": "pendiente"}).eq("id", celular_id).execute()
 
             insert_payload = {
-                "comercio_id": comercio_id,
+                "comercio_id": int(comercio_id),
                 "celular_id": celular_id,
                 "cliente_nombre": cliente_nombre,
                 "telefono": telefono,
                 "fecha_turno": fecha_iso
             }
             supabase.table("turnos_clientes").insert(insert_payload).execute()
-            print(f"[Sistema] 📅 Nuevo registro insertado en tabla turnos_clientes exitosamente.")
 
             return f"¡Perfecto! Tu cita quedó agendada para el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')} hs. ¡Te esperamos!"
 
     except Exception as e:
-        print(f"[Sistema] ❌ Error crítico en agendar_cita: {str(e)}")
-        return f"Disculpa, tuvimos una interrupción en nuestra base de datos. Podrías confirmar si estás de acuerdo con el turno para reintentar la carga?"
+        print(f"[Falla Crítica] ❌ Error en agendar_cita: {e}")
+        solicitar_asistencia_humana(f"Falla al intentar agendar un turno para {cliente_nombre}.", telefono, comercio_id)
+        return "SISTEMA_DELAY: Hubo un problema al guardar el turno en el sistema. Ya notificamos automáticamente al local. Pídele disculpas al cliente de forma muy cercana y dile que un compañero se sumará en instantes para confirmarle el turno a mano."
     
 def obtener_configuracion_comercio(comercio_id: int) -> dict:
     """Trae las políticas personalizadas del comercio desde la base de datos."""
     try:
         response = supabase.table("configuracion_comercios") \
             .select("*") \
-            .eq("comercio_id", comercio_id) \
+            .eq("comercio_id", int(comercio_id)) \
             .execute()
         if response.data:
             return response.data[0]
@@ -140,11 +139,11 @@ def solicitar_asistencia_humana(motivo: str, telefono_cliente: str, comercio_id:
     """Envía un WhatsApp de alerta al dueño del comercio notificándole que se requiere su atención."""
     print(f"\n[Sistema] 🚨 Solicitando asistencia humana para Comercio ID: {comercio_id}. Motivo: {motivo}")
     try:
-        config_res = supabase.table("configuracion_comercios").select("telefono_dueno").eq("comercio_id", comercio_id).execute()
-        comercio_res = supabase.table("comercios").select("evolution_instance").eq("id", comercio_id).execute()
+        config_res = supabase.table("configuracion_comercios").select("telefono_dueno").eq("comercio_id", int(comercio_id)).execute()
+        comercio_res = supabase.table("comercios").select("evolution_instance").eq("id", int(comercio_id)).execute()
         
         if not config_res.data or not config_res.data[0].get("telefono_dueno"):
-            return "No se pudo alertar al dueño porque no tiene configurado un teléfono de soporte en el panel."
+            return "No se pudo alertar al dueño porque no tiene configurado un teléfono de soporte."
         
         if not comercio_res.data:
             return "Error: No se encontró la instancia de WhatsApp de este comercio."
@@ -155,7 +154,7 @@ def solicitar_asistencia_humana(motivo: str, telefono_cliente: str, comercio_id:
 
         texto_alerta = (
             f"🚨 *Intervención requerida*\n\n"
-            f"📱 *Número:* {cliente_numero_limpio}\n"
+            f"📱 *Número del Cliente:* {cliente_numero_limpio}\n"
             f"📌 *Motivo:* {motivo}"
         )
 
@@ -176,11 +175,9 @@ def solicitar_asistencia_humana(motivo: str, telefono_cliente: str, comercio_id:
         res = requests.post(url, headers=headers, json=payload)
         if res.status_code in [200, 201]:
             print(f"[Sistema] ✅ WhatsApp de alerta enviado con éxito al dueño ({telefono_dueno})")
-            return "Éxito: El dueño ha sido notificado por WhatsApp y se unirá al chat a la brevedad."
+            return "Éxito: El dueño ha sido notificado."
         else:
-            print(f"[Sistema] ❌ Error Evolution API al alertar al dueño: {res.text}")
-            return "No se pudo enviar la notificación debido a un problema con el gateway de WhatsApp."
+            return "No se pudo enviar la notificación por problemas de API."
 
     except Exception as e:
-        print(f"[Sistema] ❌ Error general en solicitar_asistencia_humana: {e}")
         return f"Error interno al procesar la asistencia: {str(e)}"

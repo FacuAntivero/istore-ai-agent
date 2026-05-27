@@ -13,13 +13,13 @@ def iniciar_agente(comercio_id, telefono_cliente):
     config_tienda = tools.obtener_configuracion_comercio(comercio_id)
     
     # --- WRAPPERS DE SEGURIDAD ---
-    def consultar_inventario(modelo: str = "") -> str:
-        """Busca un modelo de celular en el inventario de la tienda."""
-        return tools.consultar_inventario(modelo, comercio_id)
+    def consultar_inventario(modelo: str) -> str:
+        """Busca una marca (ej. Samsung, iPhone) o un modelo específico de celular en el inventario."""
+        return tools.consultar_inventario(modelo, comercio_id, telefono_cliente)
 
     def consultar_horarios() -> str:
         """Consulta los horarios de atención de la tienda."""
-        return tools.consultar_horarios(comercio_id)
+        return tools.consultar_horarios(comercio_id, telefono_cliente)
 
     def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int) -> str:
         """Agenda una cita o modifica una existente para un cliente."""
@@ -72,13 +72,15 @@ def iniciar_agente(comercio_id, telefono_cliente):
 
     TUS REGLAS DE COMPORTAMIENTO:
     1. BÚSQUEDA DIRECTA Y DETALLADA: Si te dicen qué buscan, NO pidas permiso. Consultá el inventario con 'consultar_inventario' inmediatamente.
-       INFO COMPLETA: Al mostrar los celulares, DEBES listar: Modelo, Almacenamiento (GB), Condición, Porcentaje de Batería y Precio.
-       Formato: 1. [Modelo] - [Capacidad] - [Condición] - Batería: [Batería]% - $[Precio]
+       INFO COMPLETA: Al mostrar los celulares, DEBES listar: Modelo, Capacidad (GB), Estado estético, Porcentaje de Batería y Precio.
+       Formato: 1. [Modelo] - [Capacidad] - [Estado estético] - Batería: [Batería]% - $[Precio]
        Al final decile: "Decime el número del que te interesa".
 
     {reglas_atencion}
 
-    4. DERIVACIÓN HUMANA EXPLÍCITA: Si el cliente presenta un reclamo, insiste con una rebaja o completa datos de permuta, ejecuta 'solicitar_asistencia_humana'. Luego, avísale que un asesor continuará el chat en instantes.
+    4. DERIVACIÓN HUMANA Y MANEJO DE INDISPONIBILIDAD DE SISTEMA (MÁXIMA PRIORIDAD UX):
+       - Si el cliente presenta un reclamo, insiste con una rebaja o completa datos de permuta, ejecuta 'solicitar_asistencia_humana'. Luego, avísale que un asesor continuará el chat en instantes.
+       - REGLA ANTI-TECNICISMOS: Si una herramienta te responde con una nota de 'SISTEMA_DELAY' o indica un problema de acceso, BAJO NINGÚN CONCEPTO menciones palabras como "error", "base de datos", "código", "sistema" o "servidor". Actúa con naturalidad humana: dile al cliente de manera muy cálida que preferís consultar directamente con un compañero del local para darle el dato exacto, que ya le avisaste, y que aguarde un instante que ya lo atienden en vivo.
     """
     
     configuracion_ia = types.GenerateContentConfig(
