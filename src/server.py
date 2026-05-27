@@ -99,11 +99,12 @@ def simular_escribiendo(numero_destino, instance_name, encendido=True):
         pass
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
+    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
+    
     options = {"checkNumber": False}
     
     if id_mensaje and remote_jid:
@@ -111,15 +112,17 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
             "key": {"id": id_mensaje, "remoteJid": remote_jid, "fromMe": False}
         }
 
+    # 🔥 AQUÍ ESTÁ LA MAGIA: Forzamos el checkNumber en False en la raíz
     payload = {
         "number": numero_destino,
         "text": texto,
+        "checkNumber": False, 
         "options": options
     }
         
     respuesta = requests.post(url, headers=headers, json=payload)
     if respuesta.status_code in [200, 201]:
-        print("✅ Mensaje entregado a Evolution")
+        print("✅ Mensaje entregado a Evolution y WhatsApp")
     else:
         print(f"❌ Error al enviar: {respuesta.text}")
 
