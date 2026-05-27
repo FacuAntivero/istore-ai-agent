@@ -97,22 +97,28 @@ def simular_escribiendo(numero_destino, instance_name, encendido=True):
         pass
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    # 🔥 EL BYPASS DEBE IR EN LA URL: ?checkNumber=false
+    # Mantenemos el bypass en la URL por compatibilidad
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
-    options = {}
+    
+    # 🔥 Forzamos el bypass de validación dentro de las opciones
+    options = {
+        "checkNumber": False
+    }
     
     if id_mensaje and remote_jid:
         options["quoted"] = {
             "key": {"id": id_mensaje, "remoteJid": remote_jid, "fromMe": False}
         }
 
+    # 🔥 Forzamos el bypass también en la raíz del payload
     payload = {
         "number": numero_destino,
         "text": texto,
+        "checkNumber": False, 
         "options": options
     }
         
