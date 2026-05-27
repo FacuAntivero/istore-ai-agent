@@ -74,30 +74,55 @@ def guardar_contacto(lid, numero, nombre, comercio_id):
     except Exception as e:
         print(f"[Supabase] ❌ Error guardando contacto: {e}")
 
-def obtener_numero_real(lid, comercio_id, nombre_push=""):
+def obtener_numero_real(lid, comercio_id, nombre_push, instance_name):
     try:
         id_limpio = int(comercio_id) if comercio_id is not None else None
         
+        # 1. Intentar buscar en la base de datos local (Supabase)
         result = supabase.table("contactos").select("numero", "comercio_id", "nombre").eq("lid", lid).execute()
         
-        if not result.data:
-            return None 
+        if result.data:
+            for contacto in result.data:
+                if contacto.get("comercio_id") == id_limpio:
+                    return contacto["numero"]
             
-        for contacto in result.data:
-            if contacto.get("comercio_id") == id_limpio:
-                return contacto["numero"]
+            # Si está en la DB pero con otro comercio, lo vinculamos a este
+            numero_real = result.data[0]["numero"]
+            nombre_cliente = nombre_push if nombre_push else result.data[0].get("nombre", "Cliente")
+            print(f"[SaaS Link] 🔗 LID detectado en la red global. Vinculando número {numero_real} al comercio {id_limpio}")
+            guardar_contacto(lid, numero_real, nombre_cliente, id_limpio)
+            return numero_real
+            
+        # 2. 🔥 RED DE SEGURIDAD: Consultar a Evolution API en tiempo real
+        print(f"🔍 [Motor de Búsqueda] {lid} no encontrado en DB. Consultando a Evolution API...")
         
-        numero_real = result.data[0]["numero"]
-        nombre_cliente = nombre_push if nombre_push else result.data[0].get("nombre", "Cliente")
+        url_profile = f"{EVOLUTION_API_URL}/chat/fetchProfile/{instance_name}"
+        headers = {"apikey": API_KEY, "Content-Type": "application/json"}
+        payload = {"number": lid}
         
-        print(f"[SaaS Link] 🔗 LID detectado en la red global. Vinculando número {numero_real} al comercio {id_limpio}")
+        respuesta = requests.post(url_profile, headers=headers, json=payload, timeout=5)
         
-        guardar_contacto(lid, numero_real, nombre_cliente, id_limpio)
-        
-        return numero_real
-        
+        if respuesta.status_code in [200, 201]:
+            res_data = respuesta.json()
+            # Evolution puede devolver una lista o un objeto directo
+            data_obj = res_data[0] if isinstance(res_data, list) and len(res_data) > 0 else res_data
+            
+            id_real = None
+            if isinstance(data_obj, dict):
+                id_real = data_obj.get("id") or data_obj.get("jid") or data_obj.get("number")
+                
+            if id_real and id_real.endswith("@s.whatsapp.net"):
+                print(f"🎯 [Evolution API] ¡Éxito! Encontrado número real en tiempo real: {id_real}")
+                nombre_cliente = nombre_push if nombre_push else "Cliente"
+                guardar_contacto(lid, id_real, nombre_cliente, id_limpio)
+                return id_real
+            else:
+                print(f"⚠️ [Evolution API] No se pudo extraer el ID real. Respuesta: {res_data}")
+        else:
+            print(f"❌ [Evolution API] Error en fetchProfile: {respuesta.text}")
+
     except Exception as e:
-        print(f"[Supabase] ❌ Error en el motor de búsqueda global: {e}")
+        print(f"[Supabase/Evolution] ❌ Error en la red de seguridad global: {e}")
     return None
 
 def simular_escribiendo(numero_destino, instance_name, encendido=True):
@@ -289,7 +314,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             elif participant and participant.endswith("@s.whatsapp.net"):
                 id_remitente = participant
             else:
-                numero_guardado = obtener_numero_real(remote_jid, comercio_id, push_name)
+                numero_guardado = obtener_numero_real(remote_jid, comercio_id, push_name, instance_name)
                 if numero_guardado: 
                     id_remitente = numero_guardado
             
