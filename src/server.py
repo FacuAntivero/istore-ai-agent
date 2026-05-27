@@ -34,7 +34,6 @@ mensajes_procesados = set()
 buffer_mensajes = {}
 timers_debounce = {}
 
-# ⏱️ CONFIGURACIÓN DINÁMICA DESDE EL .ENV
 TIEMPO_ESPERA_MENSAJE = float(os.getenv("DEBOUNCE_SECONDS", 3.5))
 
 EVOLUTION_API_URL = "https://evolution-api-production-4b88.up.railway.app"
@@ -48,7 +47,6 @@ def obtener_comercio(instancia):
     if instancia in CACHE_COMERCIOS:
         return CACHE_COMERCIOS[instancia]
     try:
-        # 💡 Cambiamos .eq por .ilike para que ignore mayúsculas/minúsculas
         res = supabase.table("comercios").select("*").ilike("evolution_instance", instancia).execute()
         if res.data:
             CACHE_COMERCIOS[instancia] = res.data[0]
@@ -61,7 +59,7 @@ MI_NUMERO = os.getenv("MI_NUMERO", "5492494600615@s.whatsapp.net")
 
 def guardar_contacto(lid, numero, nombre, comercio_id):
     try:
-        if numero == MI_NUMERO:
+        if numero == MI_NUMERO or numero.endswith("@lid"):
             return
         result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", comercio_id).execute()
         if result.data:
@@ -99,24 +97,22 @@ def simular_escribiendo(numero_destino, instance_name, encendido=True):
         pass
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}"
+    # 🔥 EL BYPASS DEBE IR EN LA URL: ?checkNumber=false
+    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
-    
-    options = {"checkNumber": False}
+    options = {}
     
     if id_mensaje and remote_jid:
         options["quoted"] = {
             "key": {"id": id_mensaje, "remoteJid": remote_jid, "fromMe": False}
         }
 
-    # 🔥 AQUÍ ESTÁ LA MAGIA: Forzamos el checkNumber en False en la raíz
     payload = {
         "number": numero_destino,
         "text": texto,
-        "checkNumber": False, 
         "options": options
     }
         
@@ -166,7 +162,6 @@ async def procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, rem
 
 
 def extraer_texto_mensaje(msg_object):
-    """ Función robusta para buscar el texto en cualquier capa del JSON de Evolution """
     if not isinstance(msg_object, dict):
         return None
     
@@ -176,7 +171,6 @@ def extraer_texto_mensaje(msg_object):
     if "extendedTextMessage" in msg_object and "text" in msg_object["extendedTextMessage"]:
         return msg_object["extendedTextMessage"]["text"]
         
-    # Buscar recursivamente si está anidado en otra llave "message"
     for key, value in msg_object.items():
         if isinstance(value, dict):
             resultado = extraer_texto_mensaje(value)
@@ -195,12 +189,10 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
     comercio = obtener_comercio(instance_name)
     if not comercio:
-        print(f"❌ Comercio no encontrado para la instancia: {instance_name}")
         return {"status": "error"}
 
     comercio_id = comercio["id"]
 
-    # Procesar contactos
     if evento_actual == "contacts.upsert":
         try:
             contactos_data = datos.get("data", [])
@@ -215,16 +207,13 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             pass
         return {"status": "ok"}
 
-    # Filtrar eventos innecesarios
     if evento_actual not in ["messages.upsert", "messages.update"]:
         return {"status": "ok"}
 
     try:
         mensaje_data = datos.get("data", {})
         
-        # En messages.upsert, data a veces es un dict o a veces el primer elemento de una lista "messages"
         if isinstance(mensaje_data, dict) and "message" in mensaje_data and isinstance(mensaje_data["message"], dict) and "message" in mensaje_data["message"]:
-             # Estructura profunda: data -> message -> message -> ...
              msg_content = mensaje_data["message"]["message"]
         elif "message" in mensaje_data:
              msg_content = mensaje_data["message"]
@@ -240,15 +229,14 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         id_mensaje = key.get("id", "")
         push_name = mensaje_data.get("pushName", "")
         sender = mensaje_data.get("sender", "")
+        participant = key.get("participant", "")
 
         if remote_jid.endswith("@g.us") or remote_jid == "status@broadcast":
             return {"status": "ignorado"}
 
-        # 🔥 AQUÍ UTILIZAMOS LA NUEVA FUNCIÓN EXTRACTORA DE TEXTO
         texto_usuario = extraer_texto_mensaje(msg_content)
         
         if not texto_usuario:
-            print(f"⚠️ No se pudo extraer texto del mensaje: {id_mensaje}")
             return {"status": "ignorado"}
 
         if remote_jid.endswith("@lid") and sender.endswith("@s.whatsapp.net"):
@@ -258,12 +246,18 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             return {"status": "ignorado"}
         mensajes_procesados.add(id_mensaje)
 
+        # 🔥 NUEVA LÓGICA: BÚSQUEDA AGRESIVA DEL NÚMERO REAL
         id_remitente = remote_jid
         if remote_jid.endswith("@lid"):
-            numero_guardado = obtener_numero_real(remote_jid, comercio_id)
-            if numero_guardado: id_remitente = numero_guardado
+            if participant and participant.endswith("@s.whatsapp.net"):
+                id_remitente = participant
+            elif sender and sender.endswith("@s.whatsapp.net"):
+                id_remitente = sender
+            else:
+                numero_guardado = obtener_numero_real(remote_jid, comercio_id)
+                if numero_guardado: 
+                    id_remitente = numero_guardado
 
-        # ⏱️ LÓGICA DE DEBOUNCE
         if id_remitente not in buffer_mensajes:
             buffer_mensajes[id_remitente] = []
         
