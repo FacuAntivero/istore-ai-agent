@@ -76,7 +76,15 @@ def guardar_contacto(lid, numero, nombre, comercio_id):
 
 def obtener_numero_real(lid, comercio_id):
     try:
-        result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", comercio_id).execute()
+        # 🔥 Forzamos que el comercio_id sea un entero por si viene como texto
+        id_limpio = int(comercio_id) if comercio_id is not None else None
+        
+        print(f"[Supabase Debug] Buscando número real para LID: {lid} | comercio_id original: {comercio_id} (Tipo: {type(comercio_id)}) -> Usando: {id_limpio}")
+        
+        result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", id_limpio).execute()
+        
+        print(f"[Supabase Debug] Resultado de la base de datos: {result.data}")
+        
         if result.data:
             return result.data[0]["numero"]
     except Exception as e:
