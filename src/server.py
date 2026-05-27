@@ -85,7 +85,6 @@ def obtener_numero_real(lid, comercio_id):
     return None
 
 def simular_escribiendo(numero_destino, instance_name, encendido=True):
-    """Envia el estado 'escribiendo...' (composing) a Evolution API."""
     url = f"{EVOLUTION_API_URL}/chat/sendPresence/{instance_name}"
     headers = {"apikey": API_KEY, "Content-Type": "application/json"}
     payload = {
@@ -96,7 +95,7 @@ def simular_escribiendo(numero_destino, instance_name, encendido=True):
     try:
         requests.post(url, headers=headers, json=payload)
     except Exception as e:
-        print(f"⚠️ No se pudo cambiar estado escribiendo: {e}")
+        pass
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
@@ -114,13 +113,12 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
     payload = {
         "number": numero_destino,
         "text": texto,
-        "checkNumber": False,
         "options": options
     }
         
     respuesta = requests.post(url, headers=headers, json=payload)
     if respuesta.status_code in [200, 201]:
-        print("✅ Mensaje entregado con éxito")
+        print("✅ Mensaje entregado a Evolution")
     else:
         print(f"❌ Error al enviar: {respuesta.text}")
 
@@ -144,30 +142,43 @@ async def procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, rem
         texto_respuesta = respuesta.text
         print(f"[Agente] 🤖 Respuesta lista: {texto_respuesta}")
 
-        # 🔥 LÓGICA SIMULADOR HUMANO DESDE EL .ENV
         activar_delay_humano = os.getenv("SIMULATE_HUMAN_DELAY", "true").lower() == "true"
         
         if activar_delay_humano:
             simular_escribiendo(id_remitente, instance_name, encendido=True)
-            
             tiempo_lectura = 1.5
             tiempo_tipeo = min(len(texto_respuesta) * 0.02, 6.0) 
             delay_total = round(random.uniform(tiempo_lectura + tiempo_tipeo, (tiempo_lectura + tiempo_tipeo) + 1.5), 1)
-            
-            print(f"⏳ Esperando {delay_total} segundos (simulando escritura humana...)")
             await asyncio.sleep(delay_total)
-            
             simular_escribiendo(id_remitente, instance_name, encendido=False)
-        else:
-            print("⚡ Modo test activo: Ignorando delay de escritura humana.")
 
         enviar_mensaje_whatsapp(id_remitente, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid)
 
     except errors.APIError as e:
-        print(f"[Error API] {e.message}")
+        print(f"[Error API Gemini] {e.message}")
         enviar_mensaje_whatsapp(id_remitente, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid)
     except Exception as e:
         print(f"[Error Inesperado] {str(e)}")
+
+
+def extraer_texto_mensaje(msg_object):
+    """ Función robusta para buscar el texto en cualquier capa del JSON de Evolution """
+    if not isinstance(msg_object, dict):
+        return None
+    
+    if "conversation" in msg_object and isinstance(msg_object["conversation"], str):
+        return msg_object["conversation"]
+        
+    if "extendedTextMessage" in msg_object and "text" in msg_object["extendedTextMessage"]:
+        return msg_object["extendedTextMessage"]["text"]
+        
+    # Buscar recursivamente si está anidado en otra llave "message"
+    for key, value in msg_object.items():
+        if isinstance(value, dict):
+            resultado = extraer_texto_mensaje(value)
+            if resultado: return resultado
+            
+    return None
 
 @app.post("/webhook")
 async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
@@ -180,10 +191,12 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
     comercio = obtener_comercio(instance_name)
     if not comercio:
+        print(f"❌ Comercio no encontrado para la instancia: {instance_name}")
         return {"status": "error"}
 
     comercio_id = comercio["id"]
 
+    # Procesar contactos
     if evento_actual == "contacts.upsert":
         try:
             contactos_data = datos.get("data", [])
@@ -198,11 +211,22 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             pass
         return {"status": "ok"}
 
-    if evento_actual == "send.message":
+    # Filtrar eventos innecesarios
+    if evento_actual not in ["messages.upsert", "messages.update"]:
         return {"status": "ok"}
 
     try:
         mensaje_data = datos.get("data", {})
+        
+        # En messages.upsert, data a veces es un dict o a veces el primer elemento de una lista "messages"
+        if isinstance(mensaje_data, dict) and "message" in mensaje_data and isinstance(mensaje_data["message"], dict) and "message" in mensaje_data["message"]:
+             # Estructura profunda: data -> message -> message -> ...
+             msg_content = mensaje_data["message"]["message"]
+        elif "message" in mensaje_data:
+             msg_content = mensaje_data["message"]
+        else:
+             msg_content = mensaje_data
+
         key = mensaje_data.get("key", {})
 
         if key.get("fromMe", False):
@@ -213,15 +237,14 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         push_name = mensaje_data.get("pushName", "")
         sender = mensaje_data.get("sender", "")
 
-        if remote_jid.endswith("@g.us"):
+        if remote_jid.endswith("@g.us") or remote_jid == "status@broadcast":
             return {"status": "ignorado"}
 
-        msg_content = mensaje_data.get("message", {})
-        if "conversation" in msg_content:
-            texto_usuario = msg_content["conversation"]
-        elif "extendedTextMessage" in msg_content:
-            texto_usuario = msg_content["extendedTextMessage"]["text"]
-        else:
+        # 🔥 AQUÍ UTILIZAMOS LA NUEVA FUNCIÓN EXTRACTORA DE TEXTO
+        texto_usuario = extraer_texto_mensaje(msg_content)
+        
+        if not texto_usuario:
+            print(f"⚠️ No se pudo extraer texto del mensaje: {id_mensaje}")
             return {"status": "ignorado"}
 
         if remote_jid.endswith("@lid") and sender.endswith("@s.whatsapp.net"):
@@ -236,9 +259,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             numero_guardado = obtener_numero_real(remote_jid, comercio_id)
             if numero_guardado: id_remitente = numero_guardado
 
-        # ==========================================================
-        # ⏱️ LÓGICA DE DEBOUNCE O COLECTOR DE MENSAJES
-        # ==========================================================
+        # ⏱️ LÓGICA DE DEBOUNCE
         if id_remitente not in buffer_mensajes:
             buffer_mensajes[id_remitente] = []
         
@@ -251,7 +272,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             timers_debounce[id_remitente].cancel()
 
         async def timer_task():
-            # Utiliza la variable leída dinámicamente del .env
             await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
             await procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, remote_jid)
 
@@ -260,5 +280,5 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         return {"status": "en_espera"}
 
     except Exception as e:
-        print(f"Error procesando: {e}")
+        print(f"Error procesando mensaje: {e}")
         return {"status": "error"}
