@@ -318,9 +318,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 if numero_guardado: 
                     id_remitente = numero_guardado
             
-            if id_remitente.endswith("@lid"):
-                print(f"🛡️ [Ignorado] Mensaje de {push_name} ({remote_jid}) descartado. WhatsApp ocultó el número real y Evolution API no permite responder a alias.")
-                return {"status": "ignorado"}
+           
 
         # Limpiamos el número para que sea más fácil guardarlo y buscarlo
         id_remitente_limpio = id_remitente.split("@")[0]
