@@ -78,24 +78,20 @@ def obtener_numero_real(lid, comercio_id, nombre_push=""):
     try:
         id_limpio = int(comercio_id) if comercio_id is not None else None
         
-        # 🚀 OPTIMIZACIÓN SAAS: Una sola llamada a la DB para traer todo el historial global del LID
         result = supabase.table("contactos").select("numero", "comercio_id", "nombre").eq("lid", lid).execute()
         
         if not result.data:
-            return None  # Totalmente desconocido en toda la plataforma
+            return None 
             
-        # 🧠 Procesamos en memoria (Ultra rápido) para ver si ya pertenece al comercio actual
         for contacto in result.data:
             if contacto.get("comercio_id") == id_limpio:
                 return contacto["numero"]
         
-        # Si llegó acá, el LID existe en otro comercio pero NO en el actual (Intersección de Clientes)
         numero_real = result.data[0]["numero"]
         nombre_cliente = nombre_push if nombre_push else result.data[0].get("nombre", "Cliente")
         
         print(f"[SaaS Link] 🔗 LID detectado en la red global. Vinculando número {numero_real} al comercio {id_limpio}")
         
-        # Sincronizamos los datos creando la fila correspondiente para este comercio de manera aislada
         guardar_contacto(lid, numero_real, nombre_cliente, id_limpio)
         
         return numero_real
@@ -170,17 +166,25 @@ async def procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, rem
         
         if activar_delay_humano:
             simular_escribiendo(id_remitente, instance_name, encendido=True)
-            tiempo_lectura = 1.5
-            tiempo_tipeo = min(len(texto_respuesta) * 0.02, 6.0) 
-            delay_total = round(random.uniform(tiempo_lectura + tiempo_tipeo, (tiempo_lectura + tiempo_tipeo) + 1.5), 1)
+            
+            # 🔥 NUEVO CÁLCULO DE DELAY (Más seguro contra baneos)
+            tiempo_lectura = random.uniform(2.0, 4.0) # Base mínima de lectura
+            tiempo_tipeo = max(len(texto_respuesta) * 0.03, 3.5) # Al menos 3.5 segs escribiendo
+            delay_total = round(tiempo_lectura + tiempo_tipeo, 1)
+            
+            # Limitamos el máximo a 10 segundos para no frustrar al cliente
+            delay_total = min(delay_total, 10.0) 
+            
             await asyncio.sleep(delay_total)
             simular_escribiendo(id_remitente, instance_name, encendido=False)
 
-        enviar_mensaje_whatsapp(id_remitente, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid)
+        # 🔥 AHORA ENVIAMOS LA RESPUESTA AL remote_jid ORIGINAL (Que puede ser un alias)
+        # Esto es vital. WhatsApp Web / Evolution necesitan el JID original del chat para contestar.
+        enviar_mensaje_whatsapp(remote_jid, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid)
 
     except errors.APIError as e:
         print(f"[Error API Gemini] {e.message}")
-        enviar_mensaje_whatsapp(id_remitente, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid)
+        enviar_mensaje_whatsapp(remote_jid, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid)
     except Exception as e:
         print(f"[Error Inesperado] {str(e)}")
 
@@ -258,7 +262,9 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         remote_jid = key.get("remoteJid", "")
         id_mensaje = key.get("id", "")
         push_name = mensaje_data.get("pushName", "")
-        sender = mensaje_data.get("sender", "")
+        
+        # 🔥 EL CAMBIO CLAVE ESTÁ AQUÍ. Buscamos el sender principal en la raíz.
+        sender = datos.get("sender", mensaje_data.get("sender", ""))
         participant = key.get("participant", "")
 
         if remote_jid.endswith("@g.us") or remote_jid == "status@broadcast":
@@ -277,41 +283,43 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         mensajes_procesados.add(id_mensaje)
 
         # 🔥 BÚSQUEDA AGRESIVA DEL NÚMERO REAL
-        id_remitente = remote_jid
-        print(f"[Debug] remote_jid={remote_jid} | sender={sender} | participant={participant}")
+        # Usamos el número real para la base de datos (Gemini/Supabase) pero conservamos el remote_jid para enviar el mensaje.
+        id_remitente = remote_jid 
         
         if remote_jid.endswith("@lid"):
-            if participant and participant.endswith("@s.whatsapp.net"):
-                id_remitente = participant
-            elif sender and sender.endswith("@s.whatsapp.net"):
+            if sender and sender.endswith("@s.whatsapp.net"):
                 id_remitente = sender
+            elif participant and participant.endswith("@s.whatsapp.net"):
+                id_remitente = participant
             else:
-                # 🚀 Pasamos push_name para optimizar la vinculación si corresponde
                 numero_guardado = obtener_numero_real(remote_jid, comercio_id, push_name)
                 if numero_guardado: 
                     id_remitente = numero_guardado
             
-            # 🛡️ LA DEFENSA DEFINITIVA
             if id_remitente.endswith("@lid"):
                 print(f"🛡️ [Ignorado] Mensaje de {push_name} ({remote_jid}) descartado. WhatsApp ocultó el número real y Evolution API no permite responder a alias.")
                 return {"status": "ignorado"}
 
-        if id_remitente not in buffer_mensajes:
-            buffer_mensajes[id_remitente] = []
+        # Limpiamos el número para que sea más fácil guardarlo y buscarlo
+        id_remitente_limpio = id_remitente.split("@")[0]
+
+        if id_remitente_limpio not in buffer_mensajes:
+            buffer_mensajes[id_remitente_limpio] = []
         
-        buffer_mensajes[id_remitente].append({
+        buffer_mensajes[id_remitente_limpio].append({
             "texto": texto_usuario,
             "id_mensaje": id_mensaje
         })
 
-        if id_remitente in timers_debounce and not timers_debounce[id_remitente].done():
-            timers_debounce[id_remitente].cancel()
+        if id_remitente_limpio in timers_debounce and not timers_debounce[id_remitente_limpio].done():
+            timers_debounce[id_remitente_limpio].cancel()
 
         async def timer_task():
             await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
-            await procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, remote_jid)
+            # Pasamos tanto la ID limpia (para Gemini/DB) como el remote_jid (para enviar el WhatsApp)
+            await procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, remote_jid)
 
-        timers_debounce[id_remitente] = asyncio.create_task(timer_task())
+        timers_debounce[id_remitente_limpio] = asyncio.create_task(timer_task())
         
         return {"status": "en_espera"}
 
