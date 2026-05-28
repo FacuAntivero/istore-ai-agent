@@ -94,6 +94,12 @@ def obtener_numero_real(lid, comercio_id, nombre_push, instance_name):
             return numero_real
             
         # 2. 🔥 RED DE SEGURIDAD: Consultar a Evolution API en tiempo real
+        # 👉 BYPASS CRÍTICO: Si es un @lid nuevo, WhatsApp prohíbe fetchProfile devolviendo Error 400. 
+        # Evitamos la consulta inútil y dejamos que el bot interactúe usando el @lid de manera directa.
+        if lid.endswith("@lid"):
+            print(f"⚠️ [Motor de Búsqueda] {lid} es un ID enmascarado nuevo. Saltando fetchProfile para evitar bloqueo 400 de Evolution API.")
+            return None
+            
         print(f"🔍 [Motor de Búsqueda] {lid} no encontrado en DB. Consultando a Evolution API...")
         
         url_profile = f"{EVOLUTION_API_URL}/chat/fetchProfile/{instance_name}"
@@ -104,7 +110,6 @@ def obtener_numero_real(lid, comercio_id, nombre_push, instance_name):
         
         if respuesta.status_code in [200, 201]:
             res_data = respuesta.json()
-            # Evolution puede devolver una lista o un objeto directo
             data_obj = res_data[0] if isinstance(res_data, list) and len(res_data) > 0 else res_data
             
             id_real = None
@@ -126,7 +131,6 @@ def obtener_numero_real(lid, comercio_id, nombre_push, instance_name):
     return None
 
 def simular_escribiendo(numero_destino, instance_name, encendido=True):
-    # Agregamos el bypass también en la URL del presence
     url = f"{EVOLUTION_API_URL}/chat/sendPresence/{instance_name}?checkNumber=false"
     headers = {"apikey": API_KEY, "Content-Type": "application/json"}
     payload = {
@@ -141,22 +145,20 @@ def simular_escribiendo(numero_destino, instance_name, encendido=True):
         pass
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    # 1. Bypass en la URL (Para Evolution v1 y algunas v2)
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
     
-    # 2. Bypass masivo en el cuerpo del JSON
     payload = {
         "number": numero_destino,
         "text": texto,
-        "checkNumber": False,       # Bypass en la raíz
-        "verifyNumber": False,      # Alias común por si acaso
+        "checkNumber": False,       
+        "verifyNumber": False,      
         "options": {
             "delay": 0,
-            "checkNumber": False    # Bypass dentro de options (Evolution v2.2+)
+            "checkNumber": False    
         }
     }
     
@@ -197,7 +199,6 @@ async def procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, rem
         activar_delay_humano = os.getenv("SIMULATE_HUMAN_DELAY", "true").lower() == "true"
         
         if activar_delay_humano:
-            # 🔥 USAMOS remote_jid PARA QUE EVOLUTION SEPA QUE ES UN @lid
             simular_escribiendo(remote_jid, instance_name, encendido=True)
             
             tiempo_lectura = random.uniform(2.0, 4.0)
@@ -208,12 +209,10 @@ async def procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, rem
             await asyncio.sleep(delay_total)
             simular_escribiendo(remote_jid, instance_name, encendido=False)
 
-        # 🔥 CAMBIO AQUÍ: Enviamos a remote_jid en lugar de id_remitente
         enviar_mensaje_whatsapp(remote_jid, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid)
 
     except errors.APIError as e:
         print(f"[Error API Gemini] {e.message}")
-        # 🔥 CAMBIO AQUÍ TAMBIÉN
         enviar_mensaje_whatsapp(remote_jid, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid)
     except Exception as e:
         print(f"[Error Inesperado] {str(e)}")
@@ -240,7 +239,6 @@ def extraer_texto_mensaje(msg_object):
 async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
     datos = await request.json()
     
-    # 🔥 EL DEBUG DEFINITIVO
     print("\n--- INICIO JSON WEBHOOK ---")
     print(json.dumps(datos, indent=2))
     print("--- FIN JSON WEBHOOK ---\n")
@@ -293,7 +291,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         id_mensaje = key.get("id", "")
         push_name = mensaje_data.get("pushName", "")
         
-        # 🔥 EL CAMBIO CLAVE ESTÁ AQUÍ. Buscamos el sender principal en la raíz.
         sender = mensaje_data.get("sender", "")
         participant = key.get("participant", "")
 
@@ -312,8 +309,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             return {"status": "ignorado"}
         mensajes_procesados.add(id_mensaje)
 
-        # 🔥 BÚSQUEDA AGRESIVA DEL NÚMERO REAL
-        # Usamos el número real para la base de datos (Gemini/Supabase) pero conservamos el remote_jid para enviar el mensaje.
         id_remitente = remote_jid 
         
         if remote_jid.endswith("@lid"):
@@ -326,7 +321,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 if numero_guardado: 
                     id_remitente = numero_guardado
 
-        # Limpiamos el número para que sea más fácil guardarlo y buscarlo
         id_remitente_limpio = id_remitente.split("@")[0]
 
         if id_remitente_limpio not in buffer_mensajes:
@@ -342,7 +336,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
         async def timer_task():
             await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
-            # Pasamos tanto la ID limpia (para Gemini/DB) como el remote_jid (para enviar el WhatsApp)
             await procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, remote_jid)
 
         timers_debounce[id_remitente_limpio] = asyncio.create_task(timer_task())
