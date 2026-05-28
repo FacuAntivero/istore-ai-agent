@@ -139,18 +139,17 @@ def simular_escribiendo(numero_destino, instance_name, encendido=True):
         pass
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    # 1. Eliminamos la trampa del '?checkNumber=false' de la URL
-    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}"
+    # 🔥 EL COMBO GANADOR: URL con checkNumber=false
+    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
     
-    # 2. Armamos el paquete principal
+    # Enviamos el destino exacto que recibimos (con su @lid)
     payload = {
         "number": numero_destino,
-        "text": texto,
-        "checkNumber": False  # 🔥 AQUÍ ESTÁ LA MAGIA. Es un False booleano puro de Python.
+        "text": texto
     }
     
     options = {
