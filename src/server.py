@@ -139,14 +139,22 @@ def simular_escribiendo(numero_destino, instance_name, encendido=True):
         pass
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
+    # 1. Eliminamos la trampa del '?checkNumber=false' de la URL
+    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
     
+    # 2. Armamos el paquete principal
+    payload = {
+        "number": numero_destino,
+        "text": texto,
+        "checkNumber": False  # 🔥 AQUÍ ESTÁ LA MAGIA. Es un False booleano puro de Python.
+    }
+    
     options = {
-        "checkNumber": False
+        "delay": 0
     }
     
     if id_mensaje and remote_jid:
@@ -154,18 +162,16 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
             "key": {"id": id_mensaje, "remoteJid": remote_jid, "fromMe": False}
         }
 
-    payload = {
-        "number": numero_destino,
-        "text": texto,
-        "checkNumber": False, 
-        "options": options
-    }
+    payload["options"] = options
         
-    respuesta = requests.post(url, headers=headers, json=payload)
-    if respuesta.status_code in [200, 201]:
-        print("✅ Mensaje entregado a Evolution y WhatsApp")
-    else:
-        print(f"❌ Error al enviar: {respuesta.text}")
+    try:
+        respuesta = requests.post(url, headers=headers, json=payload)
+        if respuesta.status_code in [200, 201]:
+            print("✅ Mensaje entregado a Evolution y despachado a WhatsApp")
+        else:
+            print(f"❌ Error al enviar: {respuesta.text}")
+    except Exception as e:
+        print(f"❌ Error crítico de red: {e}")
 
 async def procesar_bloque_mensajes(id_remitente, comercio_id, instance_name, remote_jid):
     if id_remitente not in buffer_mensajes or not buffer_mensajes[id_remitente]:
