@@ -126,12 +126,14 @@ def obtener_numero_real(lid, comercio_id, nombre_push, instance_name):
     return None
 
 def simular_escribiendo(numero_destino, instance_name, encendido=True):
-    url = f"{EVOLUTION_API_URL}/chat/sendPresence/{instance_name}"
+    # Agregamos el bypass también en la URL del presence
+    url = f"{EVOLUTION_API_URL}/chat/sendPresence/{instance_name}?checkNumber=false"
     headers = {"apikey": API_KEY, "Content-Type": "application/json"}
     payload = {
         "number": numero_destino,
         "presence": "composing" if encendido else "available",
-        "delay": 0
+        "delay": 0,
+        "checkNumber": False
     }
     try:
         requests.post(url, headers=headers, json=payload)
@@ -139,29 +141,29 @@ def simular_escribiendo(numero_destino, instance_name, encendido=True):
         pass
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    # 🔥 EL COMBO GANADOR: URL con checkNumber=false
+    # 1. Bypass en la URL (Para Evolution v1 y algunas v2)
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
     headers = {
         "apikey": API_KEY,
         "Content-Type": "application/json"
     }
     
-    # Enviamos el destino exacto que recibimos (con su @lid)
+    # 2. Bypass masivo en el cuerpo del JSON
     payload = {
         "number": numero_destino,
-        "text": texto
-    }
-    
-    options = {
-        "delay": 0
+        "text": texto,
+        "checkNumber": False,       # Bypass en la raíz
+        "verifyNumber": False,      # Alias común por si acaso
+        "options": {
+            "delay": 0,
+            "checkNumber": False    # Bypass dentro de options (Evolution v2.2+)
+        }
     }
     
     if id_mensaje and remote_jid:
-        options["quoted"] = {
+        payload["options"]["quoted"] = {
             "key": {"id": id_mensaje, "remoteJid": remote_jid, "fromMe": False}
         }
-
-    payload["options"] = options
         
     try:
         respuesta = requests.post(url, headers=headers, json=payload)
