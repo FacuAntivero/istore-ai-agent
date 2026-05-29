@@ -1,5 +1,5 @@
 from google import genai
-from google import types
+from google.genai import types
 import config
 import tools
 from datetime import datetime
