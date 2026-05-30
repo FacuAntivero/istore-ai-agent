@@ -407,9 +407,10 @@ async def crear_preferencia(request: Request):
             ],
             "external_reference": str(comercio_id),
             "back_urls": {
-                "success": "http://localhost:3000/?pago=exitoso",
-                "failure": "http://localhost:3000/?pago=fallido",
-                "pending": "http://localhost:3000/?pago=pendiente"
+                # Reemplazamos localhost por tu URL segura de Railway
+                "success": "https://istore-ai-agent-production.up.railway.app/?pago=exitoso",
+                "failure": "https://istore-ai-agent-production.up.railway.app/?pago=fallido",
+                "pending": "https://istore-ai-agent-production.up.railway.app/?pago=pendiente"
             },
             "auto_return": "approved"
         }
