@@ -5,13 +5,14 @@ import random
 sys.path.insert(0, os.path.dirname(__file__))
 
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware  # <-- 1. IMPORTAMOS CORS AQUÍ
 from starlette.middleware.base import BaseHTTPMiddleware
 from google.genai import errors
 from supabase import create_client
 import requests
 import json
 import asyncio
-import mercadopago  # <-- NUEVA IMPORTACIÓN
+import mercadopago
 from dotenv import load_dotenv
 
 from agent import iniciar_agente
@@ -19,6 +20,16 @@ from agent import iniciar_agente
 load_dotenv()
 
 app = FastAPI(title="iStore AI Webhook")
+
+# <-- 2. AGREGAMOS ESTE BLOQUE DE CORS -->
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# <--------------------------------------->
 
 class NgrokHeaderMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
