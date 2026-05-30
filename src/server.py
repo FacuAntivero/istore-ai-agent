@@ -401,13 +401,13 @@ async def crear_preferencia(request: Request):
                 {
                     "title": "iStore Admin - Plan Pro Mensual",
                     "quantity": 1,
-                    "unit_price": 15000.00, # Podés ajustar tu precio acá
+                    "unit_price": 15000.00,
                     "currency_id": "ARS"
                 }
             ],
             "external_reference": str(comercio_id),
             "back_urls": {
-                "success": "http://localhost:3000/?pago=exitoso", # Cambiá esto a tu dominio de producción luego
+                "success": "http://localhost:3000/?pago=exitoso",
                 "failure": "http://localhost:3000/?pago=fallido",
                 "pending": "http://localhost:3000/?pago=pendiente"
             },
@@ -415,8 +415,16 @@ async def crear_preferencia(request: Request):
         }
 
         preference_response = mp.preference().create(preference_data)
-        preference = preference_response["response"]
         
+        # --- AGREGAMOS ESTO PARA VER LA RESPUESTA REAL DE MERCADOPAGO ---
+        print(f"🔍 RESPUESTA DE MP: {preference_response}")
+
+        # Si el status que devuelve MP no es 200 o 201 (que significan OK), lanzamos error
+        if preference_response.get("status") not in [200, 201]:
+            error_detalle = preference_response.get("response", "Error desconocido")
+            raise Exception(f"MercadoPago rechazó la petición: {error_detalle}")
+        
+        preference = preference_response["response"]
         return {"init_point": preference["init_point"]}
 
     except Exception as e:
