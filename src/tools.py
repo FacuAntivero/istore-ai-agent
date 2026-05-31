@@ -5,14 +5,14 @@ import json
 from database import supabase
 
 def consultar_inventario(modelo_corregido: str, comercio_id: int, telefono_cliente: str) -> str:
-    """Busca stock de un celular devolviendo todos sus atributos útiles."""
+    """Busca stock de un celular devolviendo todos sus atributos útiles y cantidad."""
     print(f"\n[Sistema] 🔍 Buscando en BD: {modelo_corregido} - Comercio: {comercio_id}")
     try:
         response = supabase.table("inventario_celulares") \
-            .select("id, modelo, capacidad, estado_estetico, bateria, precio") \
+            .select("id, modelo, capacidad, estado_estetico, bateria, precio, stock") \
             .eq("comercio_id", int(comercio_id)) \
             .ilike("modelo", f"%{modelo_corregido}%") \
-            .eq("estado_venta", "disponible") \
+            .gt("stock", 0) \
             .execute()
             
         datos = response.data
@@ -23,7 +23,6 @@ def consultar_inventario(modelo_corregido: str, comercio_id: int, telefono_clien
         
     except Exception as e:
         print(f"[Falla Crítica] ❌ Error en inventario: {e}")
-        # 🔥 Alerta automática interna al dueño para que no dependa de que la IA responda bien
         solicitar_asistencia_humana("Falla técnica del servidor al intentar consultar el inventario.", telefono_cliente, comercio_id)
         return "SISTEMA_DELAY: Hubo una interrupción temporal de conexión. Ya notificamos automáticamente a un asesor humano. Pídele disculpas al cliente de forma muy amable, sin tecnicismos, y dile que un compañero del local continuará el chat en instantes."
 
@@ -53,19 +52,20 @@ def consultar_horarios(comercio_id: int, telefono_cliente: str) -> str:
         return "SISTEMA_DELAY: No se pudieron leer los horarios. Ya notificamos automáticamente a un asesor humano. Pídele disculpas al cliente de forma muy cercana y dile que un compañero del local lo atenderá enseguida."
 
 def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int = None, comercio_id: int = None) -> str:
-    """Agenda o modifica una cita con alta tolerancia a parámetros nulos o fallos de red."""
-    print(f"\n[Sistema] 📅 Ejecutando agendar_cita: {cliente_nombre} ({telefono}) - Fecha recibida: '{fecha_turno}'")
+    """Agenda o modifica una cita reservando el stock numérico del inventario."""
+    print(f"\n[Sistema] 📅 Ejecutando agendar_cita: {cliente_nombre} ({telefono})")
     try:
         try:
             celular_id = int(celular_id) if celular_id and int(celular_id) > 0 else None
+            celulares_ids_nuevos = [celular_id] if celular_id else []
         except ValueError:
-            celular_id = None
+            celulares_ids_nuevos = []
 
         settings = {'PREFER_DATES_FROM': 'future', 'TIMEZONE': 'America/Argentina/Buenos_Aires'}
         fecha_objetivo = dateparser.parse(fecha_turno, languages=['es'], settings=settings)
 
         if not fecha_objetivo:
-            return f"Error técnico: No se pudo formatear la fecha '{fecha_turno}'. Por favor, pídele al usuario que repita fecha y hora de forma simple."
+            return f"Error técnico: No se pudo formatear la fecha '{fecha_turno}'."
 
         fecha_iso = fecha_objetivo.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -77,33 +77,54 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
 
         if turno_existente.data:
             turno_viejo = turno_existente.data[0]
-            viejo_celular_id = turno_viejo.get("celular_id")
+            viejos_ids = turno_viejo.get("celulares_ids") or []
 
-            if viejo_celular_id and viejo_celular_id != celular_id:
-                supabase.table("inventario_celulares").update({"estado_venta": "disponible"}).eq("id", viejo_celular_id).execute()
+            ids_a_liberar = [vid for vid in viejos_ids if vid not in celulares_ids_nuevos]
+            ids_a_reservar = [nid for nid in celulares_ids_nuevos if nid not in viejos_ids]
+
+            # 1. Devolver el stock de los equipos que ya no quiere
+            for vid in ids_a_liberar:
+                item = supabase.table("inventario_celulares").select("stock").eq("id", vid).execute()
+                if item.data:
+                    nuevo_stock = item.data[0]["stock"] + 1
+                    supabase.table("inventario_celulares").update({"stock": nuevo_stock}).eq("id", vid).execute()
                 
-            if celular_id:
-                supabase.table("inventario_celulares").update({"estado_venta": "pendiente"}).eq("id", celular_id).execute()
+            # 2. Restar el stock de los nuevos equipos reservados
+            for nid in ids_a_reservar:
+                item = supabase.table("inventario_celulares").select("stock").eq("id", nid).execute()
+                if item.data and item.data[0]["stock"] > 0:
+                    nuevo_stock = item.data[0]["stock"] - 1
+                    supabase.table("inventario_celulares").update({"stock": nuevo_stock}).eq("id", nid).execute()
+                else:
+                    return "Lamentablemente, justo acaban de reservar la última unidad de ese equipo específico. ¿Podrías ofrecerle otra alternativa?"
                         
             update_payload = {
                 "cliente_nombre": cliente_nombre,
                 "fecha_turno": fecha_iso,
-                "celular_id": celular_id
+                "celulares_ids": celulares_ids_nuevos
             }
             supabase.table("turnos_clientes").update(update_payload).eq("id", turno_viejo["id"]).execute()
 
             return f"¡Cita modificada! Quedaste agendado para el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')}."
 
         else:
-            if celular_id:
-                supabase.table("inventario_celulares").update({"estado_venta": "pendiente"}).eq("id", celular_id).execute()
+            # 1. Restar el stock del equipo reservado (Nuevo turno)
+            for nid in celulares_ids_nuevos:
+                item = supabase.table("inventario_celulares").select("stock").eq("id", nid).execute()
+                if item.data and item.data[0]["stock"] > 0:
+                    nuevo_stock = item.data[0]["stock"] - 1
+                    supabase.table("inventario_celulares").update({"stock": nuevo_stock}).eq("id", nid).execute()
+                else:
+                    return "Lamentablemente, no queda stock disponible para reservar ese equipo específico."
 
             insert_payload = {
                 "comercio_id": int(comercio_id),
-                "celular_id": celular_id,
+                "celulares_ids": celulares_ids_nuevos,
                 "cliente_nombre": cliente_nombre,
                 "telefono": telefono,
-                "fecha_turno": fecha_iso
+                "fecha_turno": fecha_iso,
+                "tipo_registro": "cita",
+                "estado": "pendiente"
             }
             supabase.table("turnos_clientes").insert(insert_payload).execute()
 
@@ -112,7 +133,7 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
     except Exception as e:
         print(f"[Falla Crítica] ❌ Error en agendar_cita: {e}")
         solicitar_asistencia_humana(f"Falla al intentar agendar un turno para {cliente_nombre}.", telefono, comercio_id)
-        return "SISTEMA_DELAY: Hubo un problema al guardar el turno en el sistema. Ya notificamos automáticamente al local. Pídele disculpas al cliente de forma muy cercana y dile que un compañero se sumará en instantes para confirmarle el turno a mano."
+        return "SISTEMA_DELAY: Hubo un problema al guardar el turno. Notificamos al local para confirmar la cita a mano."
     
 def obtener_configuracion_comercio(comercio_id: int) -> dict:
     """Trae las políticas personalizadas del comercio desde la base de datos."""

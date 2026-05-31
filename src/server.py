@@ -51,6 +51,7 @@ mensajes_procesados = set()
 buffer_mensajes = {}
 timers_debounce = {}
 rate_limiter = {} # Guarda: { "numero_remitente": [timestamp1, timestamp2...] }
+ultimo_aviso_audio = {} # Anti-Spam: Guarda { "id_remitente": timestamp_ultimo_aviso }
 
 TIEMPO_ESPERA_MENSAJE = float(os.getenv("DEBOUNCE_SECONDS", 3.5))
 
@@ -200,7 +201,6 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
 
     # --- 🛡️ BARRERA SAAS: VALIDACIÓN DE SUSCRIPCIÓN Y SALDO ---
     try:
-        # Pedimos el dato fresco de DB
         res_comercio = supabase.table("comercios").select("mensajes_disponibles", "plan_actual", "telefono_dueno").eq("id", comercio_id).execute()
         if res_comercio.data:
             comercio_db = res_comercio.data[0]
@@ -212,17 +212,17 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
                 buffer_mensajes.pop(id_remitente_limpio, None)
                 return
             
-            # Descontamos el saldo
             nuevo_saldo = saldo - 1
             supabase.table("comercios").update({"mensajes_disponibles": nuevo_saldo}).eq("id", comercio_id).execute()
             print(f"📉 [SaaS] Crédito consumido para {comercio_id}. Restantes: {nuevo_saldo}")
 
-            # Alertas de consumo dinámicas (Asumiendo 3500 max, ajustalo a tu plan real)
-            plan_actual = str(comercio_db.get("plan_actual", "")).lower()
-            limite_plan = 3500 if "negocio" in plan_actual else 1000 
+            # Alertas de consumo dinámicas adaptadas a los límites oficiales de tus planes
+            plan_actual = str(comercio_db.get("plan_actual", "trial")).lower()
+            topes_planes = {"trial": 50, "basico": 1000, "pro": 3500, "premium": 10000}
+            limite_plan = topes_planes.get(plan_actual, 1000)
             
-            umbral_80 = int(limite_plan * 0.20)
-            umbral_95 = int(limite_plan * 0.05)
+            umbral_80 = int(limite_plan * 0.20)  # Queda el 20% disponible (80% consumido)
+            umbral_95 = int(limite_plan * 0.05)  # Queda el 5% disponible (95% consumido)
             
             if nuevo_saldo == umbral_80:
                 alertar_consumo_dueno(tel_dueno, 80, nuevo_saldo, instance_name)
@@ -262,7 +262,6 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
 
         enviar_mensaje_whatsapp(numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
 
-        # Lógica original intacta de alertas al dueño
         try:
             res_conf = supabase.table("configuracion_comercios").select("telefono_dueno", "mensaje_cotizacion_tecnico").eq("comercio_id", comercio_id).execute()
             if res_conf.data:
@@ -382,7 +381,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         if remote_jid.endswith("@g.us") or remote_jid == "status@broadcast":
             return {"status": "ignorado"}
 
-        # Resolvemos número destino
         push_name = mensaje_data.get("pushName", "Usuario")
         sender = mensaje_data.get("sender", "")
         participant = key.get("participant", "")
@@ -403,12 +401,10 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         if id_mensaje in mensajes_procesados: return {"status": "ignorado"}
         mensajes_procesados.add(id_mensaje)
 
-        # 🛡️ 1. CHECK ANTI-TROLL
         if es_troll(id_remitente_limpio):
             print(f"🚷 [Anti-Troll] Bloqueando ráfaga de mensajes de {id_remitente_limpio}")
             return {"status": "bloqueado_rate_limit"}
 
-        # 🛑 2. EXTRAER Y FILTRAR TEXTO/MULTIMEDIA
         texto_usuario, tipo_mensaje = extraer_texto_y_tipo(msg_content)
 
         if tipo_mensaje in ["sticker", "image"]:
@@ -416,6 +412,23 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             return {"status": "multimedia_ignorado"}
             
         elif tipo_mensaje == "audio":
+            plan_actual = str(comercio.get("plan_actual", "trial")).lower()
+            
+            # 🛑 LIMITACIÓN PLAN BÁSICO (Rechazo automático + Anti-Spam de 5 minutos)
+            if plan_actual == "basico":
+                ahora = time.time()
+                ultimo_ts = ultimo_aviso_audio.get(id_remitente_limpio, 0)
+                
+                if ahora - ultimo_ts > 300:  # Pasaron más de 300 segundos (5 min)
+                    ultimo_aviso_audio[id_remitente_limpio] = ahora
+                    msg_escribime = "¡Hola! Por el momento mi plan no me permite escuchar notas de voz. 🎙️❌\n\nPor favor, *escribime tu consulta por texto* para que pueda ayudarte de inmediato. 😊"
+                    enviar_mensaje_whatsapp(numero_destino, msg_escribime, instance_name, id_mensaje, key.get("remoteJid"))
+                    return {"status": "audio_denegado_plan_basico"}
+                
+                print(f"🔇 [Anti-Spam Audio] Audio de {id_remitente_limpio} ignorado silenciosamente.")
+                return {"status": "audio_ignorado_por_spam"}
+            
+            # Lógica normal para el resto de los planes (Trial, Pro, Premium)
             permite_audio = comercio.get("permitir_audios", False)
             if not permite_audio:
                 enviar_mensaje_whatsapp(numero_destino, "Perdoná, por el momento solo puedo leer textos. Por favor, escribime tu consulta 😊", instance_name, id_mensaje, key.get("remoteJid"))
@@ -457,7 +470,7 @@ async def crear_preferencia(request: Request):
     try:
         body = await request.json()
         comercio_id = body.get("comercio_id")
-        tipo_plan = body.get("tipo_plan", "pro").lower() # Por defecto 'pro' si no envían nada
+        tipo_plan = body.get("tipo_plan", "pro").lower()
         
         if not comercio_id:
             raise HTTPException(status_code=400, detail="Falta el comercio_id")
@@ -465,11 +478,10 @@ async def crear_preferencia(request: Request):
         if not mp_access_token:
             raise HTTPException(status_code=500, detail="SDK de MercadoPago no configurado en el servidor")
 
-        # 1. Definimos los precios y títulos dinámicos
         planes = {
-            "basico": {"precio": 15000.00, "titulo": "iStore Admin - Plan Básico"},
-            "pro": {"precio": 35000.00, "titulo": "iStore Admin - Plan Pro"},
-            "premium": {"precio": 85000.00, "titulo": "iStore Admin - Plan Premium"}
+            "basico": {"precio": 15000.00, "titulo": "Novva - Plan Básico"},
+            "pro": {"precio": 35000.00, "titulo": "Novva - Plan Pro"},
+            "premium": {"precio": 85000.00, "titulo": "Novva - Plan Premium"}
         }
         
         plan_seleccionado = planes.get(tipo_plan, planes["pro"])
@@ -483,7 +495,6 @@ async def crear_preferencia(request: Request):
                     "currency_id": "ARS"
                 }
             ],
-            # 2. EL TRUCO: Guardamos el ID y el Plan separados por un "|" (Ej: "5|premium")
             "external_reference": f"{comercio_id}|{tipo_plan}",
             "back_urls": {
                 "success": "https://istore-ai-agent-production.up.railway.app/?pago=exitoso",
@@ -525,12 +536,10 @@ async def webhook_mercadopago(request: Request):
             if status == "approved" and external_reference:
                 print(f"💰 [MercadoPago] ¡Pago APROBADO! ID Pago: {payment_id}")
                 
-                # 3. Extraemos el ID y el plan del texto (Ej: "5|premium" -> id: 5, plan: premium)
                 partes = external_reference.split("|")
                 comercio_id = partes[0]
                 tipo_plan = partes[1] if len(partes) > 1 else "pro"
                 
-                # 4. Asignamos los mensajes según el plan comprado
                 mensajes_por_plan = {
                     "basico": 1000,
                     "pro": 3500,
@@ -538,10 +547,8 @@ async def webhook_mercadopago(request: Request):
                 }
                 mensajes_a_cargar = mensajes_por_plan.get(tipo_plan, 3500)
                 
-                # 5. Calculamos la fecha de vencimiento (30 días exactos desde hoy)
                 fecha_vencimiento = (datetime.utcnow() + timedelta(days=30)).isoformat()
                 
-                # 6. Actualizamos toda la info del usuario en la base de datos
                 supabase.table("comercios").update({
                     "estado_suscripcion": "activa",
                     "plan_actual": tipo_plan,
@@ -557,3 +564,69 @@ async def webhook_mercadopago(request: Request):
     except Exception as e:
         print(f"❌ Error procesando Webhook de MP: {e}")
         return {"status": "error", "detail": str(e)}
+
+@app.post("/api/ventas/directa")
+async def registrar_venta_directa(request: Request):
+    """
+    Registra una venta hecha en el mostrador (sin turno previo).
+    Descuenta el stock automáticamente y agenda el post-venta.
+    """
+    try:
+        datos = await request.json()
+        comercio_id = datos.get("comercio_id")
+        cliente_nombre = datos.get("cliente_nombre", "Cliente Local")
+        telefono = datos.get("telefono")
+        celulares_ids = datos.get("celulares_ids", []) # Lista de IDs numéricos
+
+        if not comercio_id or not celulares_ids:
+            raise HTTPException(status_code=400, detail="Faltan datos obligatorios (comercio_id o celulares_ids)")
+
+        # 1. Descontar stock numérico equipo por equipo
+        for nid in celulares_ids:
+            item = supabase.table("inventario_celulares").select("stock").eq("id", nid).execute()
+            if item.data and item.data[0]["stock"] > 0:
+                nuevo_stock = item.data[0]["stock"] - 1
+                supabase.table("inventario_celulares").update({"stock": nuevo_stock}).eq("id", nid).execute()
+            else:
+                raise HTTPException(status_code=400, detail=f"No hay stock suficiente para el equipo ID: {nid}")
+
+        # 2. Registrar la venta completada para que se dispare el post-venta en 14 días
+        fecha_hoy = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        insert_payload = {
+            "comercio_id": int(comercio_id),
+            "cliente_nombre": cliente_nombre,
+            "telefono": telefono,
+            "celulares_ids": celulares_ids,
+            "tipo_registro": "venta_directa",
+            "estado": "completado",
+            "fecha_turno": fecha_hoy
+        }
+        supabase.table("turnos_clientes").insert(insert_payload).execute()
+
+        return {"status": "success", "message": "Venta registrada y stock descontado correctamente."}
+        
+    except Exception as e:
+        print(f"❌ Error en registro de venta directa: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/turnos/{turno_id}/completar")
+async def completar_turno(turno_id: int):
+    """
+    Se llama desde el panel cuando el cliente que agendó por WhatsApp se lleva el equipo.
+    Solo cambia el estado a 'completado' (el stock ya se descontó al agendar).
+    """
+    try:
+        # Verificamos si existe
+        turno_res = supabase.table("turnos_clientes").select("id").eq("id", turno_id).execute()
+        if not turno_res.data:
+            raise HTTPException(status_code=404, detail="Turno no encontrado")
+
+        # Cambiamos el estado
+        supabase.table("turnos_clientes").update({"estado": "completado"}).eq("id", turno_id).execute()
+        
+        return {"status": "success", "message": "Turno marcado como completado."}
+        
+    except Exception as e:
+        print(f"❌ Error al completar turno {turno_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
