@@ -590,7 +590,14 @@ async def registrar_venta_directa(request: Request):
             item = supabase.table("inventario_celulares").select("stock").eq("id", nid).execute()
             if item.data and item.data[0]["stock"] > 0:
                 nuevo_stock = item.data[0]["stock"] - 1
-                supabase.table("inventario_celulares").update({"stock": nuevo_stock}).eq("id", nid).execute()
+                
+                # SOLUCIÓN: Calculamos si se agotó para cambiarle el estado
+                nuevo_estado = "vendido" if nuevo_stock == 0 else "disponible"
+                
+                supabase.table("inventario_celulares").update({
+                    "stock": nuevo_stock,
+                    "estado_venta": nuevo_estado
+                }).eq("id", nid).execute()
             else:
                 raise HTTPException(status_code=400, detail=f"No hay stock suficiente para el equipo ID: {nid}")
 
