@@ -630,3 +630,36 @@ async def completar_turno(turno_id: int):
     except Exception as e:
         print(f"❌ Error al completar turno {turno_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- PLANIFICADOR DE NOTIFICACIONES INTEGRADO (CRON INTERNO) ---
+from cron_notificaciones import procesar_recordatorios, procesar_postventa
+
+async def planificador_interno():
+    """Bucle infinito en segundo plano que revisa la hora y ejecuta las notificaciones."""
+    print("[Planificador] 🚀 Motor de notificaciones automáticas iniciado en segundo plano.")
+    while True:
+        try:
+            # Los servidores de Railway usan la hora mundial (UTC).
+            # Si queremos que en Argentina corra a las 11:00 AM, en UTC deben ser las 14:00 hs.
+            ahora = datetime.utcnow()
+            
+            if ahora.hour == 14 and ahora.minute == 0:
+                print(f"[Planificador] ⏰ ¡Son las 11:00 AM en Argentina! Ejecutando tareas automáticas...")
+                
+                # Ejecutamos las funciones que importamos de cron_notificaciones.py
+                procesar_recordatorios()
+                procesar_postventa()
+                
+                # Dormimos 60 segundos para asegurarnos de que no se ejecute dos veces en el mismo minuto
+                await asyncio.sleep(60)
+                
+        except Exception as e:
+            print(f"[Planificador ❌ Error en el loop de notificaciones: {e}")
+            
+        # Revisa la hora cada 30 segundos (no consume nada de procesador)
+        await asyncio.sleep(30)
+
+@app.on_event("startup")
+async def arrancar_planificador_en_segundo_plano():
+    """Le dice a FastAPI que encienda el reloj apenas el servidor se ponga en marcha."""
+    asyncio.create_task(planificador_interno())

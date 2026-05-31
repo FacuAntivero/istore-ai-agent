@@ -130,8 +130,3 @@ def procesar_postventa():
     except Exception as e:
         print(f"[CRON CRÍTICO] Error en post-venta: {e}")
 
-if __name__ == "__main__":
-    print(f"--- INICIANDO MOTOR DE NOTIFICACIONES: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-    procesar_recordatorios()
-    procesar_postventa()
-    print("--- TAREAS COMPLETADAS ---")
