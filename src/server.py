@@ -23,7 +23,11 @@ app = FastAPI(title="iStore AI Webhook")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000", 
+        "https://istore-admin-r5z5o6795-facuantivero08-7140s-projects.vercel.app", # Tu URL de Vercel
+        "*" # (Recomendado por ahora para evitar dolores de cabeza, permite todo)
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
