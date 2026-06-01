@@ -624,19 +624,30 @@ async def registrar_venta_directa(request: Request):
 @app.put("/api/turnos/{turno_id}/completar")
 async def completar_turno(turno_id: int):
     """
-    Se llama desde el panel cuando el cliente que agendó por WhatsApp se lleva el equipo.
-    Solo cambia el estado a 'completado' (el stock ya se descontó al agendar).
+    Se llama desde el panel cuando el cliente se lleva el equipo.
+    Cambia el turno a 'completado' Y marca el equipo como 'vendido' en el inventario.
     """
     try:
-        # Verificamos si existe
-        turno_res = supabase.table("turnos_clientes").select("id").eq("id", turno_id).execute()
+        # 1. Verificamos si existe el turno y traemos los IDs de los celulares
+        turno_res = supabase.table("turnos_clientes").select("id, celulares_ids").eq("id", turno_id).execute()
         if not turno_res.data:
             raise HTTPException(status_code=404, detail="Turno no encontrado")
 
-        # Cambiamos el estado
+        turno = turno_res.data[0]
+        celulares_ids = turno.get("celulares_ids", [])
+
+        # 2. Cambiamos el estado del turno a completado
         supabase.table("turnos_clientes").update({"estado": "completado"}).eq("id", turno_id).execute()
         
-        return {"status": "success", "message": "Turno marcado como completado."}
+        # 3. ACTUALIZACIÓN CRÍTICA: Cambiamos el estado del celular a vendido y aseguramos stock 0
+        if celulares_ids:
+            for nid in celulares_ids:
+                supabase.table("inventario_celulares").update({
+                    "estado_venta": "vendido",
+                    "stock": 0 
+                }).eq("id", nid).execute()
+        
+        return {"status": "success", "message": "Turno marcado como completado y stock actualizado."}
         
     except Exception as e:
         print(f"❌ Error al completar turno {turno_id}: {e}")

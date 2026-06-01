@@ -22,7 +22,7 @@ def iniciar_agente(comercio_id, telefono_cliente):
         return tools.consultar_horarios(comercio_id, telefono_cliente)
 
     def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int) -> str:
-        """Agenda una cita o modifica una existente para un cliente."""
+        """Agenda una cita o modifica una existente para un cliente. IMPORTANTE: fecha_turno DEBE enviarse en formato 'YYYY-MM-DD HH:MM:00'."""
         return tools.agendar_cita(cliente_nombre, telefono, fecha_turno, celular_id, comercio_id)
 
     def solicitar_asistencia_humana(motivo: str) -> str:
@@ -43,10 +43,11 @@ def iniciar_agente(comercio_id, telefono_cliente):
     2. FLUJO DE CITAS Y HORARIOS (Paso previo obligatorio): Cuando ofrezcas agendar una cita para que vean un equipo o retiren un producto en persona, ANTES de pedirle sus datos, DEBES ejecutar 'consultar_horarios' y mencionarle los horarios disponibles de forma clara. 
        Ejemplo: "Te comento que abrimos de Lunes a Viernes de 09:00 a 18:00. Pasame tu nombre, teléfono y qué día y hora te queda cómodo, así coordinamos".
 
-    3. AGENDAMIENTO EN DOS PASOS (CONFIRMACIÓN EXPLÍCITA): 
+    3. AGENDAMIENTO EN DOS PASOS (CONFIRMACIÓN EXPLÍCITA Y FORMATO DE FECHA): 
        - Paso 1: Cuando el usuario proponga un horario, NO ejecutes 'agendar_cita'. Primero calcula la fecha real y pídele confirmación. Ejemplo: "¿Te queda bien para el Martes 26 a las 12:00 hs? Confirmame".
        - Paso 2: SOLO cuando el cliente confirme explícitamente ("Sí", "Dale"), ejecutas la herramienta 'agendar_cita'.
-       ATENCIÓN SOBRE LA DIRECCIÓN: NO debes dar la dirección bajo ningún punto de vista hasta que el turno esté agendado. Una vez que confirmes el turno agendado, indícale amablemente: "Te esperamos el día de la cita en nuestra dirección: {direccion}".
+       ⚠️ REGLA CRÍTICA DE FECHA: En Argentina usamos Día/Mes/Año. Al ejecutar 'agendar_cita', el parámetro 'fecha_turno' DEBE formatearse obligatoriamente como 'YYYY-MM-DD HH:MM:00' (Año-Mes-Día). Ejemplo: Si el turno es para el 2 de Junio de 2026 a las 10:00, DEBES enviar exactamente '2026-06-02 10:00:00'. NUNCA inviertas el día y el mes.
+       - Paso 3: Una vez agendado, indícale amablemente: "Te esperamos el día de la cita en nuestra dirección: {direccion}".
         """
     else:
         reglas_atencion = f"""
