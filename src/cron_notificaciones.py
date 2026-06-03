@@ -82,13 +82,13 @@ def procesar_recordatorios():
 def procesar_postventa():
     """
     Busca los mensajes de fidelización (CRM) en la cola programados para HOY 
-    y los dispara según la estrategia elegida por el comercio.
+    y los dispara leyendo el mensaje que ya fue generado en la base de datos.
     """
     print("\n[CRON] 🔍 Buscando mensajes de Post-Venta programados para hoy...")
     fecha_hoy = datetime.now().strftime("%Y-%m-%d")
     
     try:
-        # Traemos todos los envíos de la nueva tabla que toquen hoy y estén pendientes
+        # Traemos todos los envíos que toquen hoy y estén pendientes
         mensajes = supabase.table("cola_mensajes_postventa") \
             .select("*") \
             .eq("fecha_envio", fecha_hoy) \
@@ -106,42 +106,25 @@ def procesar_postventa():
                 continue
 
             nombre = msg.get("cliente_nombre", "")
-            equipos = msg.get("equipos_detalle", "equipo")
-            estrategia = msg.get("estrategia", "satisfaccion")
-
-            # Redactar el mensaje dinámicamente según la estrategia
-            if estrategia == "satisfaccion":
-                texto_ws = (
-                    f"¡Hola {nombre}! 👋 Te escribimos del local. Hace unos días te llevaste tu {equipos}. "
-                    f"Queríamos saber si pudiste pasar toda tu info correctamente y cómo viene funcionando todo. "
-                    f"¡Cualquier duda o consulta avisanos! 😊📱"
-                )
-            elif estrategia == "upselling":
-                texto_ws = (
-                    f"¡Hola {nombre}! 👋 Esperamos que estés disfrutando a pleno tu {equipos}. "
-                    f"Te queríamos contar que nos entraron accesorios nuevos y vidrios templados específicos para tu modelo. "
-                    f"¡Por haber comprado el celu tenés un descuento especial en el mostrador! Te esperamos 🛒"
-                )
-            elif estrategia == "resena":
-                texto_ws = (
-                    f"¡Hola {nombre}! 👋 ¿Cómo viene ese {equipos}? "
-                    f"Si estás conforme con el equipo y nuestra atención, nos ayudarías un montón dejándonos una reseña en Google Maps. "
-                    f"¡Gracias por elegirnos y confiar en nosotros! ⭐"
-                )
-            else:
-                texto_ws = (
-                    f"¡Hola {nombre}! 👋 Queríamos hacerte un seguimiento rápido para saber cómo estás "
-                    f"con tu {equipos}. ¡Estamos a tu disposición por cualquier cosa! ✅"
-                )
+            telefono = msg["telefono"]
+            
+            # --- LA MAGIA DE LA FASE 6 ---
+            # Tomamos el texto que ya redactó el servidor el día de la venta
+            texto_ws = msg.get("mensaje_texto")
+            
+            # Fallback de seguridad por si hay algún registro viejo sin texto
+            if not texto_ws:
+                equipos = msg.get("equipos_detalle", "equipo")
+                texto_ws = f"¡Hola {nombre}! Gracias por tu compra de {equipos} en nuestro local. ¡Estamos a disposición!"
 
             # Enviar el WhatsApp y actualizar el estado
-            if enviar_whatsapp(msg["telefono"], texto_ws, instancia):
+            print(f"📱 Intentando enviar mensaje a {nombre} ({telefono})...")
+            if enviar_whatsapp(telefono, texto_ws, instancia):
                 supabase.table("cola_mensajes_postventa").update({"estado": "enviado"}).eq("id", msg["id"]).execute()
-                print(f"✅ Post-Venta ({estrategia}) enviado a {nombre} ({msg['telefono']})")
+                print(f"✅ ¡ÉXITO! Post-Venta enviado y archivado para {nombre}.")
             else:
-                # Si falla el envío (ej: número inválido, instancia caída), marcamos como fallido para que el comercio lo vea en su panel
                 supabase.table("cola_mensajes_postventa").update({"estado": "fallido"}).eq("id", msg["id"]).execute()
-                print(f"❌ Falló el envío de Post-Venta a {nombre}")
+                print(f"❌ Falló el envío a {nombre}. Marcado como 'fallido'.")
 
     except Exception as e:
         print(f"[CRON CRÍTICO] Error procesando la cola de post-venta: {e}")

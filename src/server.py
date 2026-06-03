@@ -772,3 +772,12 @@ async def planificador_interno():
 async def arrancar_planificador_en_segundo_plano():
     """Le dice a FastAPI que encienda el reloj apenas el servidor se ponga en marcha."""
     asyncio.create_task(planificador_interno())
+    
+@app.get("/api/admin/forzar-cron-postventa")
+async def forzar_cron_postventa_endpoint():
+    """Endpoint de desarrollo para ejecutar el cron sin esperar a las 11 AM."""
+    try:
+        procesar_postventa()
+        return {"status": "success", "message": "Cron forzado ejecutado. Revisá la terminal para ver los resultados."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
