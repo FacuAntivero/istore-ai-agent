@@ -60,10 +60,11 @@ async def obtener_plantillas(comercio_id: int):
         res = supabase.table("plantillas_postventa") \
             .select("*") \
             .eq("comercio_id", comercio_id) \
-            .order("created_at", {"ascending": True}) \
+            .order("created_at", ascending=True) \
             .execute()
         return res.data
     except Exception as e:
+        print(f"❌ ERROR EN GET PLANTILLAS: {str(e)}")  # Revisar en logs de Railway
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/plantillas")
@@ -79,6 +80,7 @@ async def crear_plantilla(datos: PlantillaPostVentaInput):
         res = supabase.table("plantillas_postventa").insert(payload).execute()
         return {"status": "success", "data": res.data}
     except Exception as e:
+        print(f"❌ ERROR EN POST PLANTILLAS: {str(e)}")  # Revisar en logs de Railway
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/plantillas/{plantilla_id}")
