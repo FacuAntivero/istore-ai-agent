@@ -570,31 +570,28 @@ async def webhook_mercadopago(request: Request):
         return {"status": "error", "detail": str(e)}
 
 # --- FUNCIÓN LOGÍSTICA CENTRALIZADA PARA POST-VENTA (CRM) ---
+# --- FUNCIÓN LOGÍSTICA CENTRALIZADA PARA POST-VENTA (CRM) ---
 async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str, celulares_ids: list, estrategia: str):
     print(f"\n--- 🚀 INICIANDO POST-VENTA PARA: {cliente_nombre} ---")
     try:
         if not telefono:
-            print("⚠️ Falla temprana: No hay teléfono.")
+            print("⚠️ Omitido: No hay teléfono.")
             return
 
         # 1. Validar Plan
-        print(f"👉 Buscando plan del comercio ID: {comercio_id}...")
         comercio_res = supabase.table("comercios").select("plan_actual").eq("id", comercio_id).execute()
-        
         if not comercio_res.data:
-            print("❌ Falla: Comercio no encontrado en la DB.")
+            print("❌ Falla: Comercio no encontrado.")
             return
             
         plan_bruto = comercio_res.data[0].get("plan_actual")
         plan_comercio = plan_bruto.lower() if plan_bruto else "basico"
-        print(f"👉 Plan detectado: {plan_comercio.upper()}")
         
         if plan_comercio not in ["pro", "vip"]:
-            print("❌ Falla: El plan no es PRO o VIP.")
+            print(f"ℹ️ Post-venta omitido: Plan {plan_comercio.upper()}.")
             return
 
         # 2. Obtener Equipos
-        print(f"👉 Buscando detalles de los celulares IDs: {celulares_ids}...")
         detalles_equipos = []
         if celulares_ids:
             ids_limpios = [int(nid) for nid in celulares_ids]
@@ -603,17 +600,43 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
                 cap = f" ({eq['capacidad']})" if eq.get("capacidad") else ""
                 detalles_equipos.append(f"{eq['modelo']}{cap}")
         
-        equipos_string = ", ".join(detalles_equipos) if detalles_equipos else "Equipo Celular"
-        print(f"👉 Equipos a registrar: {equipos_string}")
+        equipos_string = ", ".join(detalles_equipos) if detalles_equipos else "tu nuevo equipo"
 
-        # 3. Calcular fecha
+        # 3. Calcular días de delay y armar la PLANTILLA AUTOMÁTICA DE CAMPAÑA
         dias_delay = 3
-        if estrategia == "upselling": dias_delay = 7
-        elif estrategia == "resena": dias_delay = 15
-        fecha_disparo = (datetime.now() + timedelta(days=dias_delay)).strftime("%Y-%m-%d")
-        print(f"👉 Fecha calculada de envío: {fecha_disparo} (Estrategia: {estrategia})")
+        texto_campana = ""
 
-        # 4. Insertar en cola
+        # Primer nombre estético para el mensaje (Ej: "Dibu Martinez" -> "Dibu")
+        primer_nombre = cliente_nombre.split()[0]
+
+        if estrategia == "satisfaccion":
+            dias_delay = 3
+            texto_campana = (
+                f"¡Hola {primer_nombre}! 😊 Te escribimos de iStore. "
+                f"Queríamos saber cómo te estás sintiendo con tu {equipos_string}. "
+                f"¿Salió todo bien? Cualquier duda o configuración que necesites, ¡estamos acá para ayudarte! 👍"
+            )
+        elif estrategia == "upselling":
+            dias_delay = 7
+            texto_campana = (
+                f"¡Hola {primer_nombre}! 🛒 Esperamos que estés disfrutando a pleno tu {equipos_string}. "
+                f"Te dejamos un mimo: por haber comprado tu equipo con nosotros, tenés un *20% OFF* "
+                f"en fundas, hidrogel o cargadores durante esta semana. ¡Te esperamos en el local! 📱"
+            )
+        elif estrategia == "resena":
+            dias_delay = 15
+            texto_campana = (
+                f"¡Hola {primer_nombre}! ⭐ Pasaron unos días desde que te llevaste tu {equipos_string} "
+                f"y tu opinión es súper importante para nosotros. Nos ayudarías un montón dejando una breve "
+                f"reseña de tu experiencia aquí: [LINK_GOOGLE_MAPS]. ¡Muchas gracias por elegirnos! 🙏"
+            )
+        else:
+            dias_delay = 3
+            texto_campana = f"¡Hola {primer_nombre}! Gracias por tu compra de {equipos_string} en iStore."
+
+        fecha_disparo = (datetime.now() + timedelta(days=dias_delay)).strftime("%Y-%m-%d")
+
+        # 4. Insertar en la cola con el texto de la campaña generado
         payload_postventa = {
             "comercio_id": comercio_id,
             "cliente_nombre": cliente_nombre,
@@ -621,18 +644,15 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
             "equipos_detalle": equipos_string,
             "estrategia": estrategia,
             "fecha_envio": fecha_disparo,
-            "estado": "pendiente"
+            "estado": "pendiente",
+            "mensaje_texto": texto_campana  
         }
         
-        print(f"👉 Intentando insertar en Supabase payload: {payload_postventa}")
         res_insert = supabase.table("cola_mensajes_postventa").insert(payload_postventa).execute()
-        
-        print(f"🎉 ¡ÉXITO! Registro insertado: {res_insert.data}")
-        print("--- ✅ FIN POST-VENTA ---")
+        print(f"🎉 ¡Fase 6 Completada! Mensaje autogenerado guardado: {res_insert.data}")
 
     except Exception as e:
-        print(f"❌ ERROR CRÍTICO CAPTURADO EN POST-VENTA: {str(e)}")
-        print("--- 🛑 FIN POST-VENTA CON ERROR ---")
+        print(f"❌ Error en Fase 6 Post-Venta: {str(e)}")
 
 # --- ENDPOINTS ACTUALIZADOS ---
 
