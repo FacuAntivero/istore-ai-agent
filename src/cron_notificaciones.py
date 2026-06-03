@@ -88,10 +88,10 @@ def procesar_postventa():
     fecha_hoy = datetime.now().strftime("%Y-%m-%d")
     
     try:
-        # Traemos todos los envíos que toquen hoy y estén pendientes
+        # Usamos .lte (Less Than or Equal) para atrapar lo de hoy y lo atrasado
         mensajes = supabase.table("cola_mensajes_postventa") \
             .select("*") \
-            .eq("fecha_envio", fecha_hoy) \
+            .lte("fecha_envio", fecha_hoy) \
             .eq("estado", "pendiente") \
             .execute()
             
