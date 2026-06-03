@@ -597,7 +597,9 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
         # 2. Obtener los nombres y capacidades de los equipos para la Card del Frontend
         detalles_equipos = []
         if celulares_ids:
-            equipos_res = supabase.table("inventario_celulares").select("modelo, capacidad").in_("id", celulares_ids).execute()
+            # FORZAMOS LA CONVERSIÓN A ENTEROS PARA EVITAR ERRORES DE TIPO EN SUPABASE
+            ids_limpios = [int(nid) for nid in celulares_ids]
+            equipos_res = supabase.table("inventario_celulares").select("modelo, capacidad").in_("id", ids_limpios).execute()
             for eq in equipos_res.data:
                 cap = f" ({eq['capacidad']})" if eq.get("capacidad") else ""
                 detalles_equipos.append(f"{eq['modelo']}{cap}")
@@ -651,9 +653,9 @@ async def registrar_venta_directa(request: Request):
         if not comercio_id or not celulares_ids:
             raise HTTPException(status_code=400, detail="Faltan datos obligatorios (comercio_id o celulares_ids)")
 
-        # 1. Descontar stock numérico equipo por equipo
+        # 1. Descontar stock numérico equipo por equipo (Asegurando que nid sea entero)
         for nid in celulares_ids:
-            item = supabase.table("inventario_celulares").select("stock").eq("id", nid).execute()
+            item = supabase.table("inventario_celulares").select("stock").eq("id", int(nid)).execute()
             if item.data and item.data[0]["stock"] > 0:
                 nuevo_stock = item.data[0]["stock"] - 1
                 nuevo_estado = "vendido" if nuevo_stock == 0 else "disponible"
@@ -661,7 +663,7 @@ async def registrar_venta_directa(request: Request):
                 supabase.table("inventario_celulares").update({
                     "stock": nuevo_stock,
                     "estado_venta": nuevo_estado
-                }).eq("id", nid).execute()
+                }).eq("id", int(nid)).execute()
             else:
                 raise HTTPException(status_code=400, detail=f"No hay stock suficiente para el equipo ID: {nid}")
 
@@ -709,13 +711,13 @@ async def completar_turno(turno_id: int, estrategia: str = "satisfaccion"):
         # 2. Cambiamos el estado del turno a completado
         supabase.table("turnos_clientes").update({"estado": "completado"}).eq("id", turno_id).execute()
         
-        # 3. Aseguramos stock 0 y estado vendido en el inventario
+        # 3. Aseguramos stock 0 y estado vendido en el inventario (Asegurando que nid sea entero)
         if celulares_ids:
             for nid in celulares_ids:
                 supabase.table("inventario_celulares").update({
                     "estado_venta": "vendido",
                     "stock": 0 
-                }).eq("id", nid).execute()
+                }).eq("id", int(nid)).execute()
         
         # 4. DISPARADOR DEL NUEVO MÓDULO POST-VENTA (Desde flujo de Citas)
         if comercio_id:
