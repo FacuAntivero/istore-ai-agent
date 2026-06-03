@@ -571,34 +571,32 @@ async def webhook_mercadopago(request: Request):
 
 # --- FUNCIÓN LOGÍSTICA CENTRALIZADA PARA POST-VENTA (CRM) ---
 async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str, celulares_ids: list, estrategia: str):
-    """
-    Verifica el plan del comercio y programa el mensaje post-venta en la nueva tabla.
-    Estrategias: 'satisfaccion' (3 días), 'upselling' (7 días), 'resena' (15 días).
-    """
+    print(f"\n--- 🚀 INICIANDO POST-VENTA PARA: {cliente_nombre} ---")
     try:
         if not telefono:
-            print(f"⚠️ No se agendó post-venta para {cliente_nombre} porque no tiene teléfono.")
+            print("⚠️ Falla temprana: No hay teléfono.")
             return
 
-        # 1. Validar el Plan del Comercio desde la base de datos
+        # 1. Validar Plan
+        print(f"👉 Buscando plan del comercio ID: {comercio_id}...")
         comercio_res = supabase.table("comercios").select("plan_actual").eq("id", comercio_id).execute()
+        
         if not comercio_res.data:
-            print(f"❌ Comercio ID {comercio_id} no encontrado para validar plan.")
+            print("❌ Falla: Comercio no encontrado en la DB.")
             return
             
-        # Blindaje por si el plan_actual está en NULL en la base de datos
         plan_bruto = comercio_res.data[0].get("plan_actual")
         plan_comercio = plan_bruto.lower() if plan_bruto else "basico"
+        print(f"👉 Plan detectado: {plan_comercio.upper()}")
         
-        # Filtro de seguridad: Solo PRO y VIP acceden
         if plan_comercio not in ["pro", "vip"]:
-            print(f"ℹ️ Post-venta omitido: El comercio {comercio_id} cuenta con Plan BÁSICO ({plan_comercio}).")
+            print("❌ Falla: El plan no es PRO o VIP.")
             return
 
-        # 2. Obtener los nombres y capacidades de los equipos para la Card del Frontend
+        # 2. Obtener Equipos
+        print(f"👉 Buscando detalles de los celulares IDs: {celulares_ids}...")
         detalles_equipos = []
         if celulares_ids:
-            # FORZAMOS LA CONVERSIÓN A ENTEROS PARA EVITAR ERRORES DE TIPO EN SUPABASE
             ids_limpios = [int(nid) for nid in celulares_ids]
             equipos_res = supabase.table("inventario_celulares").select("modelo, capacidad").in_("id", ids_limpios).execute()
             for eq in equipos_res.data:
@@ -606,17 +604,16 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
                 detalles_equipos.append(f"{eq['modelo']}{cap}")
         
         equipos_string = ", ".join(detalles_equipos) if detalles_equipos else "Equipo Celular"
+        print(f"👉 Equipos a registrar: {equipos_string}")
 
-        # 3. Calcular los días de espera según la estrategia seleccionada
-        dias_delay = 3  # Por defecto: Satisfacción
-        if estrategia == "upselling":
-            dias_delay = 7
-        elif estrategia == "resena":
-            dias_delay = 15
-
+        # 3. Calcular fecha
+        dias_delay = 3
+        if estrategia == "upselling": dias_delay = 7
+        elif estrategia == "resena": dias_delay = 15
         fecha_disparo = (datetime.now() + timedelta(days=dias_delay)).strftime("%Y-%m-%d")
+        print(f"👉 Fecha calculada de envío: {fecha_disparo} (Estrategia: {estrategia})")
 
-        # 4. Insertar en la cola de mensajes (Creará automáticamente la Card en el Frontend)
+        # 4. Insertar en cola
         payload_postventa = {
             "comercio_id": comercio_id,
             "cliente_nombre": cliente_nombre,
@@ -627,12 +624,15 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
             "estado": "pendiente"
         }
         
-        supabase.table("cola_mensajes_postventa").insert(payload_postventa).execute()
-        print(f"🚀 Post-venta agendado con éxito para {cliente_nombre} ({estrategia}) el día {fecha_disparo}")
+        print(f"👉 Intentando insertar en Supabase payload: {payload_postventa}")
+        res_insert = supabase.table("cola_mensajes_postventa").insert(payload_postventa).execute()
+        
+        print(f"🎉 ¡ÉXITO! Registro insertado: {res_insert.data}")
+        print("--- ✅ FIN POST-VENTA ---")
 
     except Exception as e:
-        print(f"❌ Error crítico al agendar el servicio post-venta: {e}")
-
+        print(f"❌ ERROR CRÍTICO CAPTURADO EN POST-VENTA: {str(e)}")
+        print("--- 🛑 FIN POST-VENTA CON ERROR ---")
 
 # --- ENDPOINTS ACTUALIZADOS ---
 
