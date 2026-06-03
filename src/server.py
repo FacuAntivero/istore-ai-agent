@@ -16,6 +16,7 @@ import mercadopago
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from agent import iniciar_agente
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -40,6 +41,10 @@ class NgrokHeaderMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(NgrokHeaderMiddleware)
+
+class EditarPostVentaInput(BaseModel):
+    mensaje_texto: str
+    fecha_envio: str
 
 # --- INICIALIZACIÓN MERCADOPAGO ---
 mp_access_token = os.getenv("MERCADOPAGO_ACCESS_TOKEN")
@@ -744,29 +749,25 @@ async def completar_turno(turno_id: int, estrategia: str = "satisfaccion"):
 from cron_notificaciones import procesar_recordatorios, procesar_postventa
 
 async def planificador_interno():
-    """Bucle infinito en segundo plano que revisa la hora y ejecuta las notificaciones."""
+    """Bucle infinito que escanea de forma horaria la DB para despachar recordatorios y post-ventas."""
     print("[Planificador] 🚀 Motor de notificaciones automáticas iniciado en segundo plano.")
     while True:
         try:
-            # Los servidores de Railway usan la hora mundial (UTC).
-            # Si queremos que en Argentina corra a las 11:00 AM, en UTC deben ser las 14:00 hs.
-            ahora = datetime.utcnow()
+            print("[Planificador] ⏰ Ejecutando escaneo automático de campañas listas...")
             
-            if ahora.hour == 14 and ahora.minute == 0:
-                print(f"[Planificador] ⏰ ¡Son las 11:00 AM en Argentina! Ejecutando tareas automáticas...")
-                
-                # Ejecutamos las funciones que importamos de cron_notificaciones.py
-                procesar_recordatorios()
-                procesar_postventa()
-                
-                # Dormimos 60 segundos para asegurarnos de que no se ejecute dos veces en el mismo minuto
-                await asyncio.sleep(60)
+            # Ejecuta las sub-rutinas modulares de cron_notificaciones.py
+            # Al usar internamente .lte("fecha_envio", fecha_hoy), se enviará todo lo que
+            # corresponda al día actual sin importar la hora exacta en la que se reprogramó.
+            procesar_recordatorios()
+            procesar_postventa()
+            
+            # Duerme 1 hora exacta (3600 segundos) para optimizar el consumo de la base de datos
+            await asyncio.sleep(3600)
                 
         except Exception as e:
-            print(f"[Planificador ❌ Error en el loop de notificaciones: {e}")
-            
-        # Revisa la hora cada 30 segundos (no consume nada de procesador)
-        await asyncio.sleep(30)
+            print(f"[Planificador] ❌ Error crítico en el loop de notificaciones: {e}")
+            # Si hay un error de conexión, espera 1 minuto y vuelve a intentar para no romper el servicio
+            await asyncio.sleep(60)
 
 @app.on_event("startup")
 async def arrancar_planificador_en_segundo_plano():
@@ -779,5 +780,25 @@ async def forzar_cron_postventa_endpoint():
     try:
         procesar_postventa()
         return {"status": "success", "message": "Cron forzado ejecutado. Revisá la terminal para ver los resultados."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.put("/api/postventa/{id_registro}")
+async def editar_mensaje_postventa(id_registro: int, datos: EditarPostVentaInput):
+    """Permite al comerciante modificar el texto y la fecha de un mensaje programado."""
+    try:
+        res = supabase.table("cola_mensajes_postventa") \
+            .update({
+                "mensaje_texto": datos.mensaje_texto,
+                "fecha_envio": datos.fecha_envio,
+                "estado": "pendiente" # Por si estaba fallido y lo corrigen
+            }) \
+            .eq("id", id_registro) \
+            .execute()
+            
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Registro no encontrado")
+            
+        return {"status": "success", "message": "Mensaje actualizado correctamente", "data": res.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
