@@ -46,6 +46,50 @@ class EditarPostVentaInput(BaseModel):
     mensaje_texto: str
     fecha_envio: str
 
+# Modelo para recibir la nueva plantilla desde React
+class PlantillaPostVentaInput(BaseModel):
+    comercio_id: int
+    nombre: str
+    dias_espera: int
+    texto: str
+
+@app.get("/api/plantillas/{comercio_id}")
+async def obtener_plantillas(comercio_id: int):
+    """Trae todas las plantillas personalizadas de un comercio."""
+    try:
+        res = supabase.table("plantillas_postventa") \
+            .select("*") \
+            .eq("comercio_id", comercio_id) \
+            .order("created_at", {"ascending": True}) \
+            .execute()
+        return res.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/plantillas")
+async def crear_plantilla(datos: PlantillaPostVentaInput):
+    """Guarda una nueva plantilla en la base de datos."""
+    try:
+        payload = {
+            "comercio_id": datos.comercio_id,
+            "nombre": datos.nombre,
+            "dias_espera": datos.dias_espera,
+            "texto": datos.texto
+        }
+        res = supabase.table("plantillas_postventa").insert(payload).execute()
+        return {"status": "success", "data": res.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/plantillas/{plantilla_id}")
+async def eliminar_plantilla(plantilla_id: int):
+    """Elimina una plantilla específica."""
+    try:
+        res = supabase.table("plantillas_postventa").delete().eq("id", plantilla_id).execute()
+        return {"status": "success", "message": "Plantilla eliminada"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 # --- INICIALIZACIÓN MERCADOPAGO ---
 mp_access_token = os.getenv("MERCADOPAGO_ACCESS_TOKEN")
 if mp_access_token:
@@ -574,9 +618,7 @@ async def webhook_mercadopago(request: Request):
         print(f"❌ Error procesando Webhook de MP: {e}")
         return {"status": "error", "detail": str(e)}
 
-# --- FUNCIÓN LOGÍSTICA CENTRALIZADA PARA POST-VENTA (CRM) ---
-# --- FUNCIÓN LOGÍSTICA CENTRALIZADA PARA POST-VENTA (CRM) ---
-async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str, celulares_ids: list, estrategia: str):
+async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str, celulares_ids: list, estrategia_o_plantilla):
     print(f"\n--- 🚀 INICIANDO POST-VENTA PARA: {cliente_nombre} ---")
     try:
         if not telefono:
@@ -607,84 +649,86 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
         
         equipos_string = ", ".join(detalles_equipos) if detalles_equipos else "tu nuevo equipo"
 
-        # 3. Calcular días de delay y armar la PLANTILLA AUTOMÁTICA DE CAMPAÑA
+        # 3. Calcular días de delay y armar la PLANTILLA
+        primer_nombre = cliente_nombre.split()[0] if cliente_nombre else "Cliente"
         dias_delay = 3
         texto_campana = ""
+        nombre_estrategia = "Post-Venta"
 
-        # Primer nombre estético para el mensaje (Ej: "Dibu Martinez" -> "Dibu")
-        primer_nombre = cliente_nombre.split()[0]
+        # MAGIA: Detectar si recibimos un ID de plantilla creada por el usuario o un texto viejo
+        es_plantilla_personalizada = False
+        
+        if str(estrategia_o_plantilla).isdigit():
+            plantilla_id = int(estrategia_o_plantilla)
+            plantilla_res = supabase.table("plantillas_postventa").eq("id", plantilla_id).execute()
+            
+            if plantilla_res.data:
+                plantilla = plantilla_res.data[0]
+                dias_delay = plantilla["dias_espera"]
+                nombre_estrategia = plantilla["nombre"]
+                
+                # Reemplazo dinámico de variables
+                texto_crudo = plantilla["texto"]
+                texto_campana = texto_crudo.replace("{nombre}", primer_nombre).replace("{equipo}", equipos_string)
+                es_plantilla_personalizada = True
 
-        if estrategia == "satisfaccion":
-            dias_delay = 3
-            texto_campana = (
-                f"¡Hola {primer_nombre}! 😊 Te escribimos de iStore. "
-                f"Queríamos saber cómo te estás sintiendo con tu {equipos_string}. "
-                f"¿Salió todo bien? Cualquier duda o configuración que necesites, ¡estamos acá para ayudarte! 👍"
-            )
-        elif estrategia == "upselling":
-            dias_delay = 7
-            texto_campana = (
-                f"¡Hola {primer_nombre}! 🛒 Esperamos que estés disfrutando a pleno tu {equipos_string}. "
-                f"Te dejamos un mimo: por haber comprado tu equipo con nosotros, tenés un *20% OFF* "
-                f"en fundas, hidrogel o cargadores durante esta semana. ¡Te esperamos en el local! 📱"
-            )
-        elif estrategia == "resena":
-            dias_delay = 15
-            texto_campana = (
-                f"¡Hola {primer_nombre}! ⭐ Pasaron unos días desde que te llevaste tu {equipos_string} "
-                f"y tu opinión es súper importante para nosotros. Nos ayudarías un montón dejando una breve "
-                f"reseña de tu experiencia aquí: [LINK_GOOGLE_MAPS]. ¡Muchas gracias por elegirnos! 🙏"
-            )
-        else:
-            dias_delay = 3
-            texto_campana = f"¡Hola {primer_nombre}! Gracias por tu compra de {equipos_string} en iStore."
+        # Fallback de seguridad (Mantiene vivas las plantillas genéricas por si la personalizada falla)
+        if not es_plantilla_personalizada:
+            nombre_estrategia = str(estrategia_o_plantilla)
+            if nombre_estrategia == "satisfaccion":
+                dias_delay = 3
+                texto_campana = f"¡Hola {primer_nombre}! 😊 Te escribimos del local. Queríamos saber cómo te estás sintiendo con tu {equipos_string}. ¿Salió todo bien? Cualquier duda que necesites, ¡estamos acá!"
+            elif nombre_estrategia == "upselling":
+                dias_delay = 7
+                texto_campana = f"¡Hola {primer_nombre}! 🛒 Esperamos que disfrutes a pleno tu {equipos_string}. Te dejamos un mimo: por haber comprado tu equipo con nosotros, tenés un *20% OFF* en accesorios esta semana."
+            elif nombre_estrategia == "resena":
+                dias_delay = 15
+                texto_campana = f"¡Hola {primer_nombre}! ⭐ Pasaron unos días desde que te llevaste tu {equipos_string}. Nos ayudarías un montón dejando una breve reseña en Google. ¡Muchas gracias por elegirnos!"
+            else:
+                dias_delay = 3
+                texto_campana = f"¡Hola {primer_nombre}! Gracias por tu compra de {equipos_string} con nosotros. ¡Estamos a tu disposición!"
 
+        # 4. Insertar en la cola con la fecha correcta
         fecha_disparo = (datetime.now() + timedelta(days=dias_delay)).strftime("%Y-%m-%d")
 
-        # 4. Insertar en la cola con el texto de la campaña generado
         payload_postventa = {
             "comercio_id": comercio_id,
             "cliente_nombre": cliente_nombre,
             "telefono": telefono,
             "equipos_detalle": equipos_string,
-            "estrategia": estrategia,
+            "estrategia": nombre_estrategia, # Guarda el nombre custom o el legacy
             "fecha_envio": fecha_disparo,
             "estado": "pendiente",
             "mensaje_texto": texto_campana  
         }
         
         res_insert = supabase.table("cola_mensajes_postventa").insert(payload_postventa).execute()
-        print(f"🎉 ¡Fase 6 Completada! Mensaje autogenerado guardado: {res_insert.data}")
+        print(f"🎉 ¡Post-Venta Agendado! Estrategia usada: {nombre_estrategia}")
 
     except Exception as e:
-        print(f"❌ Error en Fase 6 Post-Venta: {str(e)}")
+        print(f"❌ Error en agendar_postventa: {str(e)}")
 
-# --- ENDPOINTS ACTUALIZADOS ---
 
 @app.post("/api/ventas/directa")
 async def registrar_venta_directa(request: Request):
-    """
-    Registra una venta hecha en el mostrador.
-    Marca el equipo como vendido y agenda el CRM post-venta si corresponde.
-    """
     try:
         datos = await request.json()
         comercio_id = datos.get("comercio_id")
         cliente_nombre = datos.get("cliente_nombre", "Cliente Local")
         telefono = datos.get("telefono")
         celulares_ids = datos.get("celulares_ids", [])
-        estrategia = datos.get("estrategia", "satisfaccion")
+        
+        # Ahora acepta tanto el string viejo como el nuevo ID de la plantilla
+        estrategia_o_plantilla = datos.get("plantilla_id") or datos.get("estrategia", "satisfaccion")
 
         if not comercio_id or not celulares_ids:
-            raise HTTPException(status_code=400, detail="Faltan datos obligatorios (comercio_id o celulares_ids)")
+            raise HTTPException(status_code=400, detail="Faltan datos obligatorios")
 
-        # 1. Marcar los equipos como vendidos (Sin buscar "stock" numérico)
         for nid in celulares_ids:
             supabase.table("inventario_celulares").update({
                 "estado_venta": "vendido"
             }).eq("id", int(nid)).execute()
 
-        # 2. Guardar registro histórico en turnos_clientes
         fecha_hoy = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         insert_payload = {
             "comercio_id": int(comercio_id),
@@ -697,10 +741,10 @@ async def registrar_venta_directa(request: Request):
         }
         supabase.table("turnos_clientes").insert(insert_payload).execute()
 
-        # 3. DISPARADOR DEL NUEVO MÓDULO POST-VENTA
-        await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia)
+        # Disparador
+        await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia_o_plantilla)
 
-        return {"status": "success", "message": "Venta registrada y proceso post-venta calculado."}
+        return {"status": "success", "message": "Venta registrada."}
         
     except Exception as e:
         print(f"❌ Error en registro de venta directa: {e}")
@@ -708,13 +752,8 @@ async def registrar_venta_directa(request: Request):
 
 
 @app.put("/api/turnos/{turno_id}/completar")
-async def completar_turno(turno_id: int, estrategia: str = "satisfaccion"):
-    """
-    Se llama desde el calendario o panel de citas cuando el cliente retira el celular.
-    Marca el turno como completado, marca el equipo como vendido y agenda la post-venta.
-    """
+async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: int = None):
     try:
-        # 1. Verificamos si existe el turno y traemos los datos del cliente
         turno_res = supabase.table("turnos_clientes").select("id, comercio_id, cliente_nombre, telefono, celulares_ids").eq("id", turno_id).execute()
         if not turno_res.data:
             raise HTTPException(status_code=404, detail="Turno no encontrado")
@@ -725,21 +764,21 @@ async def completar_turno(turno_id: int, estrategia: str = "satisfaccion"):
         telefono = turno.get("telefono")
         celulares_ids = turno.get("celulares_ids", [])
 
-        # 2. Cambiamos el estado del turno a completado
         supabase.table("turnos_clientes").update({"estado": "completado"}).eq("id", turno_id).execute()
         
-        # 3. Marcamos el estado vendido en el inventario
         if celulares_ids:
             for nid in celulares_ids:
                 supabase.table("inventario_celulares").update({
                     "estado_venta": "vendido"
                 }).eq("id", int(nid)).execute()
         
-        # 4. DISPARADOR DEL NUEVO MÓDULO POST-VENTA (Desde flujo de Citas)
+        # Le damos prioridad a la plantilla elegida, si no, fallback a estrategia
+        estrategia_final = plantilla_id if plantilla_id else (estrategia or "satisfaccion")
+
         if comercio_id:
-            await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia)
+            await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia_final)
         
-        return {"status": "success", "message": "Turno completado con éxito y post-venta agendada."}
+        return {"status": "success"}
         
     except Exception as e:
         print(f"❌ Error al completar turno {turno_id}: {e}")
