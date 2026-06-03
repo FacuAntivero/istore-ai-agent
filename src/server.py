@@ -60,11 +60,15 @@ async def obtener_plantillas(comercio_id: int):
         res = supabase.table("plantillas_postventa") \
             .select("*") \
             .eq("comercio_id", comercio_id) \
-            .order("created_at", ascending=True) \
             .execute()
-        return res.data
+        
+        # Ordenamos la lista en memoria usando Python para evitar problemas de librería
+        # Esto asume que 'created_at' existe. Si no, puedes usar 'id'
+        datos_ordenados = sorted(res.data, key=lambda x: x.get('created_at', ''))
+        return datos_ordenados
+        
     except Exception as e:
-        print(f"❌ ERROR EN GET PLANTILLAS: {str(e)}")  # Revisar en logs de Railway
+        print(f"❌ ERROR EN GET PLANTILLAS: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/plantillas")
