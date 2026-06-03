@@ -80,53 +80,68 @@ def procesar_recordatorios():
         print(f"[CRON CRÍTICO] Error en recordatorios: {e}")
 
 def procesar_postventa():
-    """Busca ventas/citas de hace 14 días y pide feedback."""
-    print("\n[CRON] 🔍 Buscando ventas de hace 14 días para Post-Venta...")
-    hace_14_dias = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+    """
+    Busca los mensajes de fidelización (CRM) en la cola programados para HOY 
+    y los dispara según la estrategia elegida por el comercio.
+    """
+    print("\n[CRON] 🔍 Buscando mensajes de Post-Venta programados para hoy...")
+    fecha_hoy = datetime.now().strftime("%Y-%m-%d")
     
     try:
-        ventas = supabase.table("turnos_clientes") \
+        # Traemos todos los envíos de la nueva tabla que toquen hoy y estén pendientes
+        mensajes = supabase.table("cola_mensajes_postventa") \
             .select("*") \
-            .eq("estado", "completado") \
-            .eq("postventa_enviado", False) \
-            .ilike("fecha_turno", f"%{hace_14_dias}%") \
+            .eq("fecha_envio", fecha_hoy) \
+            .eq("estado", "pendiente") \
             .execute()
             
-        if not ventas.data:
-            print("[CRON] No hay post-ventas pendientes para hoy.")
+        if not mensajes.data:
+            print("[CRON] No hay post-ventas programadas para hoy.")
             return
 
-        for venta in ventas.data:
-            estado_pv = venta.get("estado_postventa", "ok")
-            nombre = venta.get("cliente_nombre", "")
-            
-            # 🚨 Si el equipo está en revisión por garantía, LO SALTAMOS
-            if estado_pv == "en_revision":
-                print(f"⚠️ Saltando a {nombre}: Equipo en garantía/revisión.")
-                # Lo marcamos como enviado para que no quede en bucle infinito
-                supabase.table("turnos_clientes").update({"postventa_enviado": True}).eq("id", venta["id"]).execute()
+        for msg in mensajes.data:
+            instancia = obtener_instancia_comercio(msg["comercio_id"])
+            if not instancia: 
+                print(f"⚠️ Saltando post-venta ID {msg['id']}: No se encontró instancia de WhatsApp.")
                 continue
 
-            instancia = obtener_instancia_comercio(venta["comercio_id"])
-            if not instancia: continue
+            nombre = msg.get("cliente_nombre", "")
+            equipos = msg.get("equipos_detalle", "equipo")
+            estrategia = msg.get("estrategia", "satisfaccion")
 
-            # Generar mensaje según el contexto
-            if estado_pv == "ok":
-                mensaje = (
-                    f"¡Hola {nombre}! 👋 Pasaron un par de semanas desde que te llevaste tu equipo. "
-                    f"¿Cómo viene funcionando todo? ¡Esperamos que lo estés súper disfrutando! 😊📱"
+            # Redactar el mensaje dinámicamente según la estrategia
+            if estrategia == "satisfaccion":
+                texto_ws = (
+                    f"¡Hola {nombre}! 👋 Te escribimos del local. Hace unos días te llevaste tu {equipos}. "
+                    f"Queríamos saber si pudiste pasar toda tu info correctamente y cómo viene funcionando todo. "
+                    f"¡Cualquier duda o consulta avisanos! 😊📱"
                 )
-            elif estado_pv == "solucionado":
-                mensaje = (
-                    f"¡Hola {nombre}! 👋 Queríamos hacer un seguimiento de tu caso y saber si, "
-                    f"luego del cambio/revisión que hicimos, el equipo quedó funcionando al 100%. "
-                    f"¡Estamos a tu disposición! 🛠️✅"
+            elif estrategia == "upselling":
+                texto_ws = (
+                    f"¡Hola {nombre}! 👋 Esperamos que estés disfrutando a pleno tu {equipos}. "
+                    f"Te queríamos contar que nos entraron accesorios nuevos y vidrios templados específicos para tu modelo. "
+                    f"¡Por haber comprado el celu tenés un descuento especial en el mostrador! Te esperamos 🛒"
+                )
+            elif estrategia == "resena":
+                texto_ws = (
+                    f"¡Hola {nombre}! 👋 ¿Cómo viene ese {equipos}? "
+                    f"Si estás conforme con el equipo y nuestra atención, nos ayudarías un montón dejándonos una reseña en Google Maps. "
+                    f"¡Gracias por elegirnos y confiar en nosotros! ⭐"
+                )
+            else:
+                texto_ws = (
+                    f"¡Hola {nombre}! 👋 Queríamos hacerte un seguimiento rápido para saber cómo estás "
+                    f"con tu {equipos}. ¡Estamos a tu disposición por cualquier cosa! ✅"
                 )
 
-            if enviar_whatsapp(venta["telefono"], mensaje, instancia):
-                supabase.table("turnos_clientes").update({"postventa_enviado": True}).eq("id", venta["id"]).execute()
-                print(f"✅ Post-Venta enviado a {nombre} ({venta['telefono']})")
+            # Enviar el WhatsApp y actualizar el estado
+            if enviar_whatsapp(msg["telefono"], texto_ws, instancia):
+                supabase.table("cola_mensajes_postventa").update({"estado": "enviado"}).eq("id", msg["id"]).execute()
+                print(f"✅ Post-Venta ({estrategia}) enviado a {nombre} ({msg['telefono']})")
+            else:
+                # Si falla el envío (ej: número inválido, instancia caída), marcamos como fallido para que el comercio lo vea en su panel
+                supabase.table("cola_mensajes_postventa").update({"estado": "fallido"}).eq("id", msg["id"]).execute()
+                print(f"❌ Falló el envío de Post-Venta a {nombre}")
 
     except Exception as e:
-        print(f"[CRON CRÍTICO] Error en post-venta: {e}")
-
+        print(f"[CRON CRÍTICO] Error procesando la cola de post-venta: {e}")

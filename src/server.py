@@ -569,18 +569,84 @@ async def webhook_mercadopago(request: Request):
         print(f"❌ Error procesando Webhook de MP: {e}")
         return {"status": "error", "detail": str(e)}
 
+# --- FUNCIÓN LOGÍSTICA CENTRALIZADA PARA POST-VENTA (CRM) ---
+async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str, celulares_ids: list, estrategia: str):
+    """
+    Verifica el plan del comercio y programa el mensaje post-venta en la nueva tabla.
+    Estrategias: 'satisfaccion' (3 días), 'upselling' (7 días), 'resena' (15 días).
+    """
+    try:
+        if not telefono:
+            print(f"⚠️ No se agendó post-venta para {cliente_nombre} porque no tiene teléfono.")
+            return
+
+        # 1. Validar el Plan del Comercio desde la base de datos
+        comercio_res = supabase.table("comercios").select("plan_actual").eq("id", comercio_id).execute()
+        if not comercio_res.data:
+            print(f"❌ Comercio ID {comercio_id} no encontrado para validar plan.")
+            return
+            
+        # Leemos 'plan_actual' y manejamos el string (por si viene 'Basico', 'Pro' o 'Vip')
+        plan_comercio = comercio_res.data[0].get("plan_actual", "basico").lower()
+        
+        # Filtro de seguridad: Solo PRO y VIP acceden
+        if plan_comercio not in ["pro", "vip"]:
+            print(f"ℹ️ Post-venta omitido: El comercio {comercio_id} cuenta con Plan BÁSICO ({plan_comercio}).")
+            return
+
+        # 2. Obtener los nombres y capacidades de los equipos para la Card del Frontend
+        detalles_equipos = []
+        if celulares_ids:
+            equipos_res = supabase.table("inventario_celulares").select("modelo, capacidad").in_("id", celulares_ids).execute()
+            for eq in equipos_res.data:
+                cap = f" ({eq['capacidad']})" if eq.get("capacidad") else ""
+                detalles_equipos.append(f"{eq['modelo']}{cap}")
+        
+        equipos_string = ", ".join(detalles_equipos) if detalles_equipos else "Equipo Celular"
+
+        # 3. Calcular los días de espera según la estrategia seleccionada por el dueño
+        dias_delay = 3  # Por defecto: Satisfacción
+        if estrategia == "upselling":
+            dias_delay = 7
+        elif estrategia == "resena":
+            dias_delay = 15
+
+        fecha_disparo = (datetime.now() + timedelta(days=dias_delay)).strftime("%Y-%m-%d")
+
+        # 4. Insertar en la cola de mensajes (Creará automáticamente la Card en el Frontend)
+        payload_postventa = {
+            "comercio_id": comercio_id,
+            "cliente_nombre": cliente_nombre,
+            "telefono": telefono,
+            "equipos_detalle": equipos_string,
+            "estrategia": estrategia,
+            "fecha_envio": fecha_disparo,
+            "estado": "pendiente"
+        }
+        
+        supabase.table("cola_mensajes_postventa").insert(payload_postventa).execute()
+        print(f"🚀 Post-venta agendado con éxito para {cliente_nombre} ({estrategia}) el día {fecha_disparo}")
+
+    except Exception as e:
+        # Lo envolvemos en un try/except independiente para que si falla la post-venta, no rompa la venta principal
+        print(f"❌ Error crítico al agendar el servicio post-venta: {e}")
+
+
+# --- ENDPOINTS ACTUALIZADOS ---
+
 @app.post("/api/ventas/directa")
 async def registrar_venta_directa(request: Request):
     """
     Registra una venta hecha en el mostrador (sin turno previo).
-    Descuenta el stock automáticamente y agenda el post-venta.
+    Descuenta el stock automáticamente y agenda el CRM post-venta si corresponde.
     """
     try:
         datos = await request.json()
         comercio_id = datos.get("comercio_id")
         cliente_nombre = datos.get("cliente_nombre", "Cliente Local")
         telefono = datos.get("telefono")
-        celulares_ids = datos.get("celulares_ids", []) # Lista de IDs numéricos
+        celulares_ids = datos.get("celulares_ids", [])
+        estrategia = datos.get("estrategia", "satisfaccion") # Recibido desde el frontend
 
         if not comercio_id or not celulares_ids:
             raise HTTPException(status_code=400, detail="Faltan datos obligatorios (comercio_id o celulares_ids)")
@@ -590,8 +656,6 @@ async def registrar_venta_directa(request: Request):
             item = supabase.table("inventario_celulares").select("stock").eq("id", nid).execute()
             if item.data and item.data[0]["stock"] > 0:
                 nuevo_stock = item.data[0]["stock"] - 1
-                
-                # SOLUCIÓN: Calculamos si se agotó para cambiarle el estado
                 nuevo_estado = "vendido" if nuevo_stock == 0 else "disponible"
                 
                 supabase.table("inventario_celulares").update({
@@ -601,7 +665,7 @@ async def registrar_venta_directa(request: Request):
             else:
                 raise HTTPException(status_code=400, detail=f"No hay stock suficiente para el equipo ID: {nid}")
 
-        # 2. Registrar la venta completada para que se dispare el post-venta en 14 días
+        # 2. Guardar registro histórico en turnos_clientes
         fecha_hoy = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         insert_payload = {
             "comercio_id": int(comercio_id),
@@ -614,7 +678,10 @@ async def registrar_venta_directa(request: Request):
         }
         supabase.table("turnos_clientes").insert(insert_payload).execute()
 
-        return {"status": "success", "message": "Venta registrada y stock descontado correctamente."}
+        # 3. DISPARADOR DEL NUEVO MÓDULO POST-VENTA
+        await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia)
+
+        return {"status": "success", "message": "Venta registrada y proceso post-venta calculado."}
         
     except Exception as e:
         print(f"❌ Error en registro de venta directa: {e}")
@@ -622,24 +689,27 @@ async def registrar_venta_directa(request: Request):
 
 
 @app.put("/api/turnos/{turno_id}/completar")
-async def completar_turno(turno_id: int):
+async def completar_turno(turno_id: int, estrategia: str = "satisfaccion"):
     """
-    Se llama desde el panel cuando el cliente se lleva el equipo.
-    Cambia el turno a 'completado' Y marca el equipo como 'vendido' en el inventario.
+    Se llama desde el calendario o panel de citas cuando el cliente retira el celular.
+    Marca el turno como completado, liquida el stock y agenda la post-venta enviada por query param.
     """
     try:
-        # 1. Verificamos si existe el turno y traemos los IDs de los celulares
-        turno_res = supabase.table("turnos_clientes").select("id, celulares_ids").eq("id", turno_id).execute()
+        # 1. Verificamos si existe el turno y traemos los datos del cliente
+        turno_res = supabase.table("turnos_clientes").select("id, comercio_id, cliente_nombre, telefono, celulares_ids").eq("id", turno_id).execute()
         if not turno_res.data:
             raise HTTPException(status_code=404, detail="Turno no encontrado")
 
         turno = turno_res.data[0]
+        comercio_id = turno.get("comercio_id")
+        cliente_nombre = turno.get("cliente_nombre")
+        telefono = turno.get("telefono")
         celulares_ids = turno.get("celulares_ids", [])
 
         # 2. Cambiamos el estado del turno a completado
         supabase.table("turnos_clientes").update({"estado": "completado"}).eq("id", turno_id).execute()
         
-        # 3. ACTUALIZACIÓN CRÍTICA: Cambiamos el estado del celular a vendido y aseguramos stock 0
+        # 3. Aseguramos stock 0 y estado vendido en el inventario
         if celulares_ids:
             for nid in celulares_ids:
                 supabase.table("inventario_celulares").update({
@@ -647,7 +717,11 @@ async def completar_turno(turno_id: int):
                     "stock": 0 
                 }).eq("id", nid).execute()
         
-        return {"status": "success", "message": "Turno marcado como completado y stock actualizado."}
+        # 4. DISPARADOR DEL NUEVO MÓDULO POST-VENTA (Desde flujo de Citas)
+        if comercio_id:
+            await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia)
+        
+        return {"status": "success", "message": "Turno completado con éxito y post-venta agendada."}
         
     except Exception as e:
         print(f"❌ Error al completar turno {turno_id}: {e}")
