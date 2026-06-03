@@ -586,8 +586,9 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
             print(f"❌ Comercio ID {comercio_id} no encontrado para validar plan.")
             return
             
-        # Leemos 'plan_actual' y manejamos el string (por si viene 'Basico', 'Pro' o 'Vip')
-        plan_comercio = comercio_res.data[0].get("plan_actual", "basico").lower()
+        # Blindaje por si el plan_actual está en NULL en la base de datos
+        plan_bruto = comercio_res.data[0].get("plan_actual")
+        plan_comercio = plan_bruto.lower() if plan_bruto else "basico"
         
         # Filtro de seguridad: Solo PRO y VIP acceden
         if plan_comercio not in ["pro", "vip"]:
@@ -606,7 +607,7 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
         
         equipos_string = ", ".join(detalles_equipos) if detalles_equipos else "Equipo Celular"
 
-        # 3. Calcular los días de espera según la estrategia seleccionada por el dueño
+        # 3. Calcular los días de espera según la estrategia seleccionada
         dias_delay = 3  # Por defecto: Satisfacción
         if estrategia == "upselling":
             dias_delay = 7
@@ -630,7 +631,6 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
         print(f"🚀 Post-venta agendado con éxito para {cliente_nombre} ({estrategia}) el día {fecha_disparo}")
 
     except Exception as e:
-        # Lo envolvemos en un try/except independiente para que si falla la post-venta, no rompa la venta principal
         print(f"❌ Error crítico al agendar el servicio post-venta: {e}")
 
 
@@ -639,8 +639,8 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
 @app.post("/api/ventas/directa")
 async def registrar_venta_directa(request: Request):
     """
-    Registra una venta hecha en el mostrador (sin turno previo).
-    Descuenta el stock automáticamente y agenda el CRM post-venta si corresponde.
+    Registra una venta hecha en el mostrador.
+    Marca el equipo como vendido y agenda el CRM post-venta si corresponde.
     """
     try:
         datos = await request.json()
@@ -648,24 +648,16 @@ async def registrar_venta_directa(request: Request):
         cliente_nombre = datos.get("cliente_nombre", "Cliente Local")
         telefono = datos.get("telefono")
         celulares_ids = datos.get("celulares_ids", [])
-        estrategia = datos.get("estrategia", "satisfaccion") # Recibido desde el frontend
+        estrategia = datos.get("estrategia", "satisfaccion")
 
         if not comercio_id or not celulares_ids:
             raise HTTPException(status_code=400, detail="Faltan datos obligatorios (comercio_id o celulares_ids)")
 
-        # 1. Descontar stock numérico equipo por equipo (Asegurando que nid sea entero)
+        # 1. Marcar los equipos como vendidos (Sin buscar "stock" numérico)
         for nid in celulares_ids:
-            item = supabase.table("inventario_celulares").select("stock").eq("id", int(nid)).execute()
-            if item.data and item.data[0]["stock"] > 0:
-                nuevo_stock = item.data[0]["stock"] - 1
-                nuevo_estado = "vendido" if nuevo_stock == 0 else "disponible"
-                
-                supabase.table("inventario_celulares").update({
-                    "stock": nuevo_stock,
-                    "estado_venta": nuevo_estado
-                }).eq("id", int(nid)).execute()
-            else:
-                raise HTTPException(status_code=400, detail=f"No hay stock suficiente para el equipo ID: {nid}")
+            supabase.table("inventario_celulares").update({
+                "estado_venta": "vendido"
+            }).eq("id", int(nid)).execute()
 
         # 2. Guardar registro histórico en turnos_clientes
         fecha_hoy = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -694,7 +686,7 @@ async def registrar_venta_directa(request: Request):
 async def completar_turno(turno_id: int, estrategia: str = "satisfaccion"):
     """
     Se llama desde el calendario o panel de citas cuando el cliente retira el celular.
-    Marca el turno como completado, liquida el stock y agenda la post-venta enviada por query param.
+    Marca el turno como completado, marca el equipo como vendido y agenda la post-venta.
     """
     try:
         # 1. Verificamos si existe el turno y traemos los datos del cliente
@@ -711,12 +703,11 @@ async def completar_turno(turno_id: int, estrategia: str = "satisfaccion"):
         # 2. Cambiamos el estado del turno a completado
         supabase.table("turnos_clientes").update({"estado": "completado"}).eq("id", turno_id).execute()
         
-        # 3. Aseguramos stock 0 y estado vendido en el inventario (Asegurando que nid sea entero)
+        # 3. Marcamos el estado vendido en el inventario
         if celulares_ids:
             for nid in celulares_ids:
                 supabase.table("inventario_celulares").update({
-                    "estado_venta": "vendido",
-                    "stock": 0 
+                    "estado_venta": "vendido"
                 }).eq("id", int(nid)).execute()
         
         # 4. DISPARADOR DEL NUEVO MÓDULO POST-VENTA (Desde flujo de Citas)
