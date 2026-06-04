@@ -7,7 +7,7 @@ import base64
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from google.genai import errors
+from google.genai import errors, types
 from supabase import create_client
 import requests
 import json
@@ -367,10 +367,12 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         textos_del_bloque.append(m["texto"])
         # Si el elemento trae contenido de audio adjunto, lo estructuramos para la SDK de Google
         if "audio_bytes" in m and m["audio_bytes"]:
-            elementos_prompt.append({
-                "mime_type": "audio/ogg",
-                "data": m["audio_bytes"]
-            })
+            # ✅ ESTE ES EL CAMBIO CLAVE: Usamos types.Part.from_bytes
+            parte_audio = types.Part.from_bytes(
+                data=m["audio_bytes"],
+                mime_type="audio/ogg"
+            )
+            elementos_prompt.append(parte_audio)
 
     texto_completo = ". ".join(textos_del_bloque)
     elementos_prompt.append(texto_completo)
@@ -385,7 +387,7 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     chat_actual = sesiones_chat[session_key]
 
     try:
-        # Pasamos la lista conteniendo tanto el texto acumulado como los binarios de los audios
+        # Pasamos la lista conteniendo tanto el texto acumulado como los objetos Part de los audios
         respuesta = chat_actual.send_message(elementos_prompt)
         texto_respuesta = respuesta.text
         print(f"[Agente] 🤖 Respuesta lista: {texto_respuesta}")
