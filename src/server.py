@@ -3,7 +3,7 @@ import os
 import time
 import random
 sys.path.insert(0, os.path.dirname(__file__))
-
+import base64
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -157,6 +157,35 @@ def obtener_comercio(instancia, forzar_actualizacion=False):
     return None
 
 MI_NUMERO = os.getenv("MI_NUMERO", "5492494600615@s.whatsapp.net")
+
+def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
+    """
+    Pide a Evolution API que descifre el mensaje multimedia y devuelve los bytes reales del audio.
+    """
+    # ⚠️ REEMPLAZÁ CON TU URL Y TU APIKEY REALES
+    url = f"https://evolution-api-production-4b88.up.railway.app/chat/getBase64FromMediaMessage/{instance_name}"
+    headers = {
+        "apikey": "API_KEY", 
+        "Content-Type": "application/json"
+    }
+    payload = {"message": mensaje_data}
+    
+    try:
+        respuesta = requests.post(url, json=payload, headers=headers)
+        if respuesta.status_code == 200:
+            datos = respuesta.json()
+            base64_string = datos.get("base64")
+            if base64_string:
+                # Si el string trae la cabecera (data:audio/ogg;base64,...), la limpiamos
+                if "," in base64_string:
+                    base64_string = base64_string.split(",")[1]
+                return base64.b64decode(base64_string)
+        else:
+            print(f"❌ Error de Evolution API al descargar media: {respuesta.text}")
+    except Exception as e:
+        print(f"❌ Error en proceso de descarga/decodificación de audio: {e}")
+        
+    return None
 
 def guardar_contacto(lid, numero, nombre, comercio_id):
     try:
@@ -316,10 +345,26 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     # ---------------------------------------------------------------
 
     mensajes = buffer_mensajes.pop(id_remitente_limpio)
-    texto_completo = ". ".join([m["texto"] for m in mensajes])
+    
+    # Preparamos el contenido estructurado que recibirá Gemini
+    elementos_prompt = []
+    textos_del_bloque = []
+
+    for m in mensajes:
+        textos_del_bloque.append(m["texto"])
+        # Si el elemento trae contenido de audio adjunto, lo estructuramos para la SDK de Google
+        if "audio_bytes" in m and m["audio_bytes"]:
+            elementos_prompt.append({
+                "mime_type": "audio/ogg",
+                "data": m["audio_bytes"]
+            })
+
+    texto_completo = ". ".join(textos_del_bloque)
+    elementos_prompt.append(texto_completo)
+    
     ultimo_id_mensaje = mensajes[-1]["id_mensaje"]
 
-    print(f"\n[Procesando Bloque 📦] {id_remitente_limpio}: {texto_completo}")
+    print(f"\n[Procesando Bloque 📦] {id_remitente_limpio}: {texto_completo} (Contiene audios: {len(elementos_prompt) > 1})")
 
     session_key = f"{comercio_id}_{id_remitente_limpio}"
     if session_key not in sesiones_chat:
@@ -327,7 +372,8 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     chat_actual = sesiones_chat[session_key]
 
     try:
-        respuesta = chat_actual.send_message(texto_completo)
+        # Pasamos la lista conteniendo tanto el texto acumulado como los binarios de los audios
+        respuesta = chat_actual.send_message(elementos_prompt)
         texto_respuesta = respuesta.text
         print(f"[Agente] 🤖 Respuesta lista: {texto_respuesta}")
 
@@ -382,7 +428,6 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         enviar_mensaje_whatsapp(numero_destino, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid_original)
     except Exception as e:
         print(f"[Error Inesperado] {str(e)}")
-
 
 # --- DETECCIÓN DE TIPOS DE MENSAJE MULTIMEDIA ---
 def extraer_texto_y_tipo(msg_object):
@@ -510,14 +555,37 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 print(f"🔇 [Anti-Spam Audio] Audio de {id_remitente_limpio} ignorado silenciosamente.")
                 return {"status": "audio_ignorado_por_spam"}
             
-            # Lógica normal para el resto de los planes (Trial, Pro, Premium)
+            # Lógica normal para el resto de los planes habilitados (Trial, Pro, Premium)
             permite_audio = comercio.get("permitir_audios", False)
             if not permite_audio:
                 enviar_mensaje_whatsapp(numero_destino, "Perdoná, por el momento solo puedo leer textos. Por favor, escribime tu consulta 😊", instance_name, id_mensaje, key.get("remoteJid"))
                 return {"status": "audio_rechazado"}
-            else:
-                enviar_mensaje_whatsapp(numero_destino, "Estoy aprendiendo a escuchar audios, pronto podré responderte. ¡Escribime porfa!", instance_name)
-                return {"status": "audio_en_desarrollo"}
+            
+            # 🌟 [PLAN PRO/PREMIUM VALIDADOS] -> Descarga asíncrona/directa del audio
+            audio_bytes = descargar_audio_evolution(instance_name, mensaje_data)
+            if not audio_bytes:
+                enviar_mensaje_whatsapp(numero_destino, "Pucha, tuve un problema al descargar tu nota de voz. 😥 ¿Me la podés repetir o escribir por texto porfa?", instance_name, id_mensaje, key.get("remoteJid"))
+                return {"status": "error_descarga_audio"}
+
+            if id_remitente_limpio not in buffer_mensajes:
+                buffer_mensajes[id_remitente_limpio] = []
+            
+            # Almacenamos los bytes directamente dentro de la lista de pendientes
+            buffer_mensajes[id_remitente_limpio].append({
+                "texto": "[El usuario envió una nota de voz/audio]",
+                "audio_bytes": audio_bytes,
+                "id_mensaje": id_mensaje
+            })
+
+            if id_remitente_limpio in timers_debounce and not timers_debounce[id_remitente_limpio].done():
+                timers_debounce[id_remitente_limpio].cancel()
+
+            async def timer_task_audio():
+                await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
+                await procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid)
+
+            timers_debounce[id_remitente_limpio] = asyncio.create_task(timer_task_audio())
+            return {"status": "audio_en_espera"}
 
         if not texto_usuario: return {"status": "ignorado"}
 
