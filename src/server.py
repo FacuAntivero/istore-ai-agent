@@ -164,7 +164,7 @@ def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
     """
     url = f"https://evolution-api-production-4b88.up.railway.app/chat/getBase64FromMediaMessage/{instance_name}"
     headers = {
-        "apikey": API_KEY,  # 🚨 IMPORTANTE: Sin comillas para que use tu variable global
+        "apikey": API_KEY,  # Usamos tu variable global correcta
         "Content-Type": "application/json"
     }
     payload = {"message": mensaje_data}
@@ -173,17 +173,31 @@ def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
         respuesta = requests.post(url, json=payload, headers=headers)
         if respuesta.status_code == 200:
             datos = respuesta.json()
+            
+            # Buscamos el base64 sin importar dónde lo haya puesto Evolution API
             base64_string = datos.get("base64")
+            
+            # Algunas versiones de Evolution meten el base64 dentro de un objeto 'media'
+            if not base64_string and "media" in datos:
+                base64_string = datos["media"].get("base64")
+
             if base64_string:
-                if "," in base64_string:
-                    base64_string = base64_string.split(",")[1]
+                # Limpiamos el prefijo si viene con formato Data URI
+                if "base64," in base64_string:
+                    base64_string = base64_string.split("base64,")[1]
+                elif "," in base64_string:
+                     base64_string = base64_string.split(",")[1]
+                
                 return base64.b64decode(base64_string)
+            else:
+                print(f"❌ Evolution API no devolvió el campo 'base64'. Respuesta: {datos}")
         else:
-            print(f"❌ Error de Evolution API al descargar media: {respuesta.text}")
+            print(f"❌ Error de Evolution API HTTP {respuesta.status_code}: {respuesta.text}")
     except Exception as e:
         print(f"❌ Error en proceso de descarga/decodificación de audio: {e}")
         
     return None
+
 def guardar_contacto(lid, numero, nombre, comercio_id):
     try:
         if numero == MI_NUMERO or numero.endswith("@lid"):
