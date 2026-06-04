@@ -162,10 +162,9 @@ def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
     """
     Pide a Evolution API que descifre el mensaje multimedia y devuelve los bytes reales del audio.
     """
-    # ⚠️ REEMPLAZÁ CON TU URL Y TU APIKEY REALES
     url = f"https://evolution-api-production-4b88.up.railway.app/chat/getBase64FromMediaMessage/{instance_name}"
     headers = {
-        "apikey": "API_KEY", 
+        "apikey": API_KEY,  # 🚨 IMPORTANTE: Sin comillas para que use tu variable global
         "Content-Type": "application/json"
     }
     payload = {"message": mensaje_data}
@@ -176,7 +175,6 @@ def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
             datos = respuesta.json()
             base64_string = datos.get("base64")
             if base64_string:
-                # Si el string trae la cabecera (data:audio/ogg;base64,...), la limpiamos
                 if "," in base64_string:
                     base64_string = base64_string.split(",")[1]
                 return base64.b64decode(base64_string)
@@ -186,7 +184,6 @@ def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
         print(f"❌ Error en proceso de descarga/decodificación de audio: {e}")
         
     return None
-
 def guardar_contacto(lid, numero, nombre, comercio_id):
     try:
         if numero == MI_NUMERO or numero.endswith("@lid"):
