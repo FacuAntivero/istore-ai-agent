@@ -164,14 +164,16 @@ def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
     """
     url = f"https://evolution-api-production-4b88.up.railway.app/chat/getBase64FromMediaMessage/{instance_name}"
     headers = {
-        "apikey": API_KEY,  # Usamos tu variable global correcta
+        "apikey": API_KEY,  # Mantenemos tu variable sin comillas
         "Content-Type": "application/json"
     }
     payload = {"message": mensaje_data}
     
     try:
         respuesta = requests.post(url, json=payload, headers=headers)
-        if respuesta.status_code == 200:
+        
+        # 🚨 CAMBIO CLAVE: Aceptamos tanto 200 (OK) como 201 (Created)
+        if respuesta.status_code in [200, 201]:
             datos = respuesta.json()
             
             # Buscamos el base64 sin importar dónde lo haya puesto Evolution API
@@ -182,7 +184,7 @@ def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
                 base64_string = datos["media"].get("base64")
 
             if base64_string:
-                # Limpiamos el prefijo si viene con formato Data URI
+                # Limpiamos el prefijo si viene con formato Data URI o con coma
                 if "base64," in base64_string:
                     base64_string = base64_string.split("base64,")[1]
                 elif "," in base64_string:
