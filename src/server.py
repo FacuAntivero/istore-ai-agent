@@ -61,35 +61,34 @@ async def obtener_plantillas(comercio_id: int):
             .eq("comercio_id", comercio_id) \
             .execute()
         
-        # 🌟 MAGIA: Si el comercio es nuevo o borró todo, le creamos las 3 por defecto en la DB
+        # 🌟 MAGIA: Si la lista está vacía, creamos los 3 ejemplos por defecto
         if not res.data:
             plantillas_defecto = [
                 {
                     "comercio_id": comercio_id,
-                    "nombre": "Encuesta de Satisfacción",
+                    "nombre": "Control de Satisfacción",
                     "dias_espera": 3,
                     "texto": "¡Hola {nombre}! 😊 Te escribimos del local. Queríamos saber cómo te estás sintiendo con tu {equipo}. ¿Salió todo bien? Cualquier duda que necesites, ¡estamos acá!"
                 },
                 {
                     "comercio_id": comercio_id,
-                    "nombre": "Upselling de Accesorios",
+                    "nombre": "Venta de Accesorios / Descuentos",
                     "dias_espera": 7,
                     "texto": "¡Hola {nombre}! 🛒 Esperamos que disfrutes a pleno tu {equipo}. Te dejamos un mimo: por haber comprado tu equipo con nosotros, tenés un *20% OFF* en accesorios esta semana."
                 },
                 {
                     "comercio_id": comercio_id,
-                    "nombre": "Pedido de Reseña en Google",
+                    "nombre": "Fidelización y Reseña de Google",
                     "dias_espera": 15,
                     "texto": "¡Hola {nombre}! ⭐ Pasaron unos días desde que te llevaste tu {equipo}. Nos ayudarías un montón dejando una breve reseña en Google. ¡Muchas gracias por elegirnos!"
                 }
             ]
-            # Las insertamos en grupo
+            # Las insertamos en la base de datos para que ya queden guardadas
             res_insert = supabase.table("plantillas_postventa").insert(plantillas_defecto).execute()
             return sorted(res_insert.data, key=lambda x: x.get('created_at', ''))
 
-        # Si ya tenía plantillas (propias o las por defecto modificadas), las ordenamos y devolvemos
-        datos_ordenados = sorted(res.data, key=lambda x: x.get('created_at', ''))
-        return datos_ordenados
+        # Si ya tenía plantillas (propias o las por defecto modificadas), las devolvemos
+        return sorted(res.data, key=lambda x: x.get('created_at', ''))
         
     except Exception as e:
         print(f"❌ ERROR EN GET PLANTILLAS: {str(e)}")
