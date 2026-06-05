@@ -26,7 +26,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://istore-admin.vercel.app" 
+        "https://istore-admin.vercel.app",
+        "https://www.novva.com.ar"  # ✅ DOMINIO AGREGADO AQUÍ PARA SOLUCIONAR EL CORS
     ],
     allow_credentials=True,
     allow_methods=["*"],
