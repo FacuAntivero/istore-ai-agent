@@ -518,9 +518,8 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
              msg_content = mensaje_data
 
         key = mensaje_data.get("key", {})
-        if key.get("fromMe", False): return {"status": "ignorado"}
-
         remote_jid = key.get("remoteJid", "")
+        
         if remote_jid.endswith("@g.us") or remote_jid == "status@broadcast":
             return {"status": "ignorado"}
 
@@ -539,6 +538,30 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 if numero_guardado: numero_destino = numero_guardado
 
         id_remitente_limpio = numero_destino.split("@")[0]
+
+        # --- 🧠 MANEJO DE CONTEXTO PARA MENSAJES ENVIADOS POR EL SISTEMA ---
+        if key.get("fromMe", False):
+            texto_saliente, tipo = extraer_texto_y_tipo(msg_content)
+            
+            if texto_saliente and tipo == "text":
+                session_key = f"{comercio_id}_{id_remitente_limpio}"
+                
+                # Instanciamos el agente si no estaba en memoria
+                if session_key not in sesiones_chat:
+                    sesiones_chat[session_key] = iniciar_agente(comercio_id, numero_destino)
+                
+                # Le inyectamos al historial de la IA lo que el sistema/humano acaba de enviar
+                sesiones_chat[session_key].history.append(
+                    types.Content(
+                        role="model", 
+                        parts=[types.Part.from_text(text=texto_saliente)]
+                    )
+                )
+                print(f"🧠 [Contexto Inyectado] Gemini ahora sabe que le dijimos: {texto_saliente[:30]}...")
+            
+            return {"status": "contexto_guardado"}
+        # -------------------------------------------------------------------
+
         id_mensaje = key.get("id", "")
 
         if id_mensaje in mensajes_procesados: return {"status": "ignorado"}
@@ -736,20 +759,20 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
     try:
         if not telefono:
             print("⚠️ Omitido: No hay teléfono.")
-            return
+            return False
 
         # 1. Validar Plan
         comercio_res = supabase.table("comercios").select("plan_actual").eq("id", comercio_id).execute()
         if not comercio_res.data:
             print("❌ Falla: Comercio no encontrado.")
-            return
+            return False
             
         plan_bruto = comercio_res.data[0].get("plan_actual")
         plan_comercio = plan_bruto.lower() if plan_bruto else "basico"
         
         if plan_comercio not in ["pro", "vip"]:
             print(f"ℹ️ Post-venta omitido: Plan {plan_comercio.upper()}.")
-            return
+            return False  # ❌ Retorna False si no le da el plan
 
         # 2. Obtener Equipos
         detalles_equipos = []
@@ -817,10 +840,11 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
         
         res_insert = supabase.table("cola_mensajes_postventa").insert(payload_postventa).execute()
         print(f"🎉 ¡Post-Venta Agendado! Estrategia usada: {nombre_estrategia}")
+        return True  # ✅ Retorna True porque se agendó con éxito
 
     except Exception as e:
         print(f"❌ Error en agendar_postventa: {str(e)}")
-
+        return False
 
 @app.post("/api/ventas/directa")
 async def registrar_venta_directa(request: Request):
@@ -831,7 +855,6 @@ async def registrar_venta_directa(request: Request):
         telefono = datos.get("telefono")
         celulares_ids = datos.get("celulares_ids", [])
         
-        # Ahora acepta tanto el string viejo como el nuevo ID de la plantilla
         estrategia_o_plantilla = datos.get("plantilla_id") or datos.get("estrategia", "satisfaccion")
 
         if not comercio_id or not celulares_ids:
@@ -854,15 +877,18 @@ async def registrar_venta_directa(request: Request):
         }
         supabase.table("turnos_clientes").insert(insert_payload).execute()
 
-        # Disparador
-        await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia_o_plantilla)
+        # Capturamos si se agendó o no
+        postventa_agendada = await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia_o_plantilla)
 
-        return {"status": "success", "message": "Venta registrada."}
+        return {
+            "status": "success", 
+            "message": "Venta registrada.",
+            "postventa_agendada": postventa_agendada # Se lo mandamos a React
+        }
         
     except Exception as e:
         print(f"❌ Error en registro de venta directa: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.put("/api/turnos/{turno_id}/completar")
 async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: int = None):
@@ -885,13 +911,17 @@ async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: i
                     "estado_venta": "vendido"
                 }).eq("id", int(nid)).execute()
         
-        # Le damos prioridad a la plantilla elegida, si no, fallback a estrategia
         estrategia_final = plantilla_id if plantilla_id else (estrategia or "satisfaccion")
 
+        # Capturamos si se agendó o no
+        postventa_agendada = False
         if comercio_id:
-            await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia_final)
+            postventa_agendada = await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia_final)
         
-        return {"status": "success"}
+        return {
+            "status": "success", 
+            "postventa_agendada": postventa_agendada # Se lo mandamos a React
+        }
         
     except Exception as e:
         print(f"❌ Error al completar turno {turno_id}: {e}")
