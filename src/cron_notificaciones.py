@@ -1,6 +1,6 @@
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from supabase import create_client
 from dotenv import load_dotenv
 
@@ -40,45 +40,6 @@ def obtener_instancia_comercio(comercio_id):
         print(f"❌ Error buscando instancia para comercio {comercio_id}: {e}")
     return None
 
-def procesar_recordatorios():
-    """Busca citas para MAÑANA y envía un recordatorio."""
-    print("\n[CRON] 🔍 Buscando recordatorios para mañana...")
-    manana = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-    
-    try:
-        turnos = supabase.table("turnos_clientes") \
-            .select("*") \
-            .eq("tipo_registro", "cita") \
-            .eq("estado", "pendiente") \
-            .eq("recordatorio_enviado", False) \
-            .ilike("fecha_turno", f"%{manana}%") \
-            .execute()
-            
-        if not turnos.data:
-            print("[CRON] No hay recordatorios pendientes.")
-            return
-
-        for turno in turnos.data:
-            instancia = obtener_instancia_comercio(turno["comercio_id"])
-            if not instancia: continue
-
-            # Formatear la hora de la cita
-            hora_cita = datetime.strptime(turno["fecha_turno"], "%Y-%m-%d %H:%M:%S").strftime("%H:%M")
-            nombre = turno.get("cliente_nombre", "Hola")
-
-            mensaje = (
-                f"¡Hola {nombre}! 👋 Te escribimos para recordarte que mañana a las *{hora_cita} hs* "
-                f"tenés tu cita reservada con nosotros.\n\n"
-                f"¿Nos confirmás tu asistencia? ¡Te esperamos! 📱"
-            )
-
-            if enviar_whatsapp(turno["telefono"], mensaje, instancia):
-                supabase.table("turnos_clientes").update({"recordatorio_enviado": True}).eq("id", turno["id"]).execute()
-                print(f"✅ Recordatorio enviado a {nombre} ({turno['telefono']})")
-
-    except Exception as e:
-        print(f"[CRON CRÍTICO] Error en recordatorios: {e}")
-
 def procesar_postventa():
     """
     Busca los mensajes de fidelización (CRM) en la cola programados para HOY 
@@ -108,7 +69,6 @@ def procesar_postventa():
             nombre = msg.get("cliente_nombre", "")
             telefono = msg["telefono"]
             
-            # --- LA MAGIA DE LA FASE 6 ---
             # Tomamos el texto que ya redactó el servidor el día de la venta
             texto_ws = msg.get("mensaje_texto")
             

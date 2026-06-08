@@ -2,60 +2,51 @@ import sys
 import os
 import time
 import random
-sys.path.insert(0, os.path.dirname(__file__))
 import base64
 import requests
 import json
 import asyncio
 import mercadopago
+from datetime import datetime, timedelta
+
+sys.path.insert(0, os.path.dirname(__file__))
+
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from google.genai import errors, types
 from supabase import create_client
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
 from pydantic import BaseModel
 from agent import iniciar_agente
 
-# 🧠 Nuevos imports para los recordatorios automáticos
+# 🧠 Imports para los recordatorios automáticos
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
 
-# --- PLANIFICADOR DE NOTIFICACIONES INTEGRADO (CRON INTERNO) ---
-from cron_notificaciones import procesar_recordatorios, procesar_postventa
+# --- PLANIFICADOR DE NOTIFICACIONES INTEGRADO (POST-VENTA) ---
+# Importamos SOLO lo que necesitamos del cron viejo para que no haya conflictos
+from cron_notificaciones import procesar_postventa
 
 async def planificador_interno():
-    """Bucle infinito que escanea de forma horaria la DB para despachar recordatorios y post-ventas."""
-    print("[Planificador] 🚀 Motor de notificaciones automáticas iniciado en segundo plano.")
+    """Bucle que escanea de forma horaria la DB para despachar post-ventas."""
+    print("[Planificador] 🚀 Motor de post-ventas iniciado en segundo plano.")
     while True:
         try:
-            print("[Planificador] ⏰ Ejecutando escaneo automático de campañas listas...")
-            
-            # Ejecuta las sub-rutinas modulares de cron_notificaciones.py
-            # Al usar internamente .lte("fecha_envio", fecha_hoy), se enviará todo lo que
-            # corresponda al día actual sin importar la hora exacta en la que se reprogramó.
-            procesar_recordatorios()
+            print("[Planificador] ⏰ Ejecutando escaneo automático de campañas post-venta...")
+            # Solo dejamos el de postventa, ya que las citas las maneja el nuevo motor por minutos
             procesar_postventa()
-            
-            # Duerme 1 hora exacta (3600 segundos) para optimizar el consumo de la base de datos
-            await asyncio.sleep(3600)
-                
+            await asyncio.sleep(3600) # Duerme 1 hora
         except Exception as e:
-            print(f"[Planificador] ❌ Error crítico en el loop de notificaciones: {e}")
-            # Si hay un error de conexión, espera 1 minuto y vuelve a intentar para no romper el servicio
+            print(f"[Planificador] ❌ Error crítico: {e}")
             await asyncio.sleep(60)
 
-import asyncio
-from datetime import datetime, timedelta
-
+# --- NUEVO MOTOR DE RECORDATORIOS POR MINUTOS ---
 async def enviar_recordatorios_citas():
     print("⏰ [Cron] Ejecutando revisión de recordatorios dinámicos por minutos...")
     try:
-        # 1. Traemos citas pendientes de los próximos 3 días
-        # Usamos un margen genérico para el escaneo inicial
         ahora_utc = datetime.utcnow()
         tres_dias_despues = ahora_utc + timedelta(days=3)
         
@@ -92,18 +83,16 @@ async def enviar_recordatorios_citas():
             
             momento_ideal_envio = fecha_turno_obj - timedelta(minutes=minutos_anticipacion)
             
-            # 🚨 LOGS DE DEPURACIÓN PARA VER LA MATEMÁTICA EN RAILWAY 🚨
+            # 🚨 LOGS DE DEPURACIÓN 🚨
             print(f"🔍 Evaluando turno {turno['id']}:")
             print(f"   - Hora del sistema (ahora): {ahora.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"   - Hora del turno:           {fecha_turno_obj.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"   - Config anticipación:      {minutos_anticipacion} minutos")
             print(f"   - Momento en que dispara:   {momento_ideal_envio.strftime('%Y-%m-%d %H:%M:%S')}")
             
-            # Condición de disparo
             if ahora >= momento_ideal_envio and ahora < fecha_turno_obj:
                 print(f"🚀 ¡CONDICIÓN CUMPLIDA! Intentando enviar a {turno.get('cliente_nombre', 'Cliente')}...")
                 
-                # Buscamos la instancia de Evolution
                 res_comercio = supabase.table("comercios").select("evolution_instance").eq("id", comercio_id).execute()
                 if not res_comercio.data or not res_comercio.data[0].get("evolution_instance"):
                     print(f"⚠️ Falló: El comercio {comercio_id} no tiene Evolution Instance.")
@@ -133,9 +122,7 @@ async def enviar_recordatorios_citas():
                 if not telefono_cliente.endswith("@s.whatsapp.net"):
                     telefono_cliente = f"{telefono_cliente}@s.whatsapp.net"
                     
-                # Despacho
                 enviar_mensaje_whatsapp(telefono_cliente, mensaje_recordatorio, instance_name)
-                
                 supabase.table("turnos_clientes").update({"recordatorio_enviado": True}).eq("id", turno["id"]).execute()
                 print(f"✅ Enviado a {nombre_cliente}.")
                 await asyncio.sleep(2)
@@ -143,18 +130,17 @@ async def enviar_recordatorios_citas():
                 print(f"⏳ Aún no es el momento (o ya pasó). Se ignoró el turno {turno['id']}.")
                 
     except Exception as e:
-        print(f"❌ [Cron] Error crítico en ejecutor de recordatorios dinámicos: {e}")
+        print(f"❌ [Cron] Error crítico: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 Arrancando planificador interno antiguo...")
+    # Lanzamos el planificador viejo (ahora solo postventa)
     asyncio.create_task(planificador_interno())
     
-    print("⏰ Iniciando el motor de recordatorios de citas...")
+    print("⏰ Iniciando el motor de recordatorios por minutos...")
     scheduler = AsyncIOScheduler()
-    
-    # CAMBIO AQUÍ: Ahora corre en intervalos regulares cada 15 minutos
-    scheduler.add_job(enviar_recordatorios_citas, 'interval', minutes=15) 
+    # ✅ Revisión cada 2 minutos (Equilibrio perfecto entre precisión y rendimiento)
+    scheduler.add_job(enviar_recordatorios_citas, 'interval', minutes=2) 
     scheduler.start()
     
     yield
@@ -169,7 +155,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "https://istore-admin.vercel.app",
-        "https://www.novva.com.ar"  # ✅ DOMINIO AGREGADO AQUÍ PARA SOLUCIONAR EL CORS
+        "https://www.novva.com.ar"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -184,11 +170,20 @@ class NgrokHeaderMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(NgrokHeaderMiddleware)
 
+# ⚡ RUTA DE PRUEBA MANUAL: Para forzar el disparo desde el navegador
+@app.get("/api/test-forzar-recordatorios")
+async def test_forzar_recordatorios():
+    print("⚡ [Manual] Forzando ejecución del motor de recordatorios...")
+    try:
+        await enviar_recordatorios_citas()
+        return {"status": "success", "message": "Motor ejecutado. Revisá los logs de Railway."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 class EditarPostVentaInput(BaseModel):
     mensaje_texto: str
     fecha_envio: str
 
-# Modelo para recibir la nueva plantilla desde React
 class PlantillaPostVentaInput(BaseModel):
     comercio_id: int
     nombre: str
