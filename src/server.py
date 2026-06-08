@@ -60,7 +60,7 @@ def programar_evento_futuro(tipo_evento: str, registro_id: int, fecha_disparo: d
     Se comunica con Upstash QStash para agendar un webhook en el futuro.
     """
     QSTASH_TOKEN = "eyJVc2VySUQiOiI0YTRjYzljZi1jMzA1LTRlNzMtYjhkYS01ZWNiNzc1MjNlMTciLCJQYXNzd29yZCI6IjgyOGQ5MTE0ZDdkNjQ5OGZhMWIxYjI3OTQ5OTcwZjczIn0=" # Reemplazar con tu token real
-    URL_RAILWAY = "https://istore-ai-agent-production.up.railway.app/" # Reemplazar con tu URL de Railway
+    URL_RAILWAY = "https://istore-ai-agent-production.up.railway.app" # Reemplazar con tu URL de Railway
     
     url_qstash = f"https://qstash.upstash.io/v2/publish/{URL_RAILWAY}/api/webhooks/disparar-mensaje-programado"
     
