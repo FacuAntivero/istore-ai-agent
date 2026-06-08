@@ -47,19 +47,20 @@ async def planificador_interno():
 async def enviar_recordatorios_citas():
     print("⏰ [Cron] Ejecutando revisión de recordatorios dinámicos por minutos...")
     try:
-        ahora_utc = datetime.utcnow()
-        tres_dias_despues = ahora_utc + timedelta(days=3)
+        # 1. Filtro súper amplio: Traemos todo lo pendiente desde ayer
+        # para que el desfasaje horario del servidor no nos oculte los turnos.
+        ayer = (datetime.utcnow() - timedelta(days=1)).isoformat()
         
         res = supabase.table("turnos_clientes") \
             .select("*") \
             .eq("estado", "pendiente") \
             .eq("recordatorio_enviado", False) \
-            .gte("fecha_turno", ahora_utc.isoformat()) \
-            .lt("fecha_turno", tres_dias_despues.isoformat()) \
+            .gte("fecha_turno", ayer) \
             .execute()
             
         turnos = res.data
         if not turnos:
+            print("   - No hay turnos pendientes para evaluar.")
             return
 
         for turno in turnos:
@@ -74,23 +75,24 @@ async def enviar_recordatorios_citas():
             if res_config.data and res_config.data[0].get("minutos_anticipacion_recordatorio") is not None:
                 minutos_anticipacion = int(res_config.data[0]["minutos_anticipacion_recordatorio"])
             
-            fecha_turno_obj = datetime.fromisoformat(turno["fecha_turno"].replace("Z", "+00:00"))
+            # Limpiamos la fecha que viene de Supabase por si trae una "Z"
+            fecha_turno_str = turno["fecha_turno"].replace("Z", "")
+            fecha_turno_obj = datetime.fromisoformat(fecha_turno_str)
             
-            if fecha_turno_obj.tzinfo is not None:
-                ahora = datetime.now(fecha_turno_obj.tzinfo)
-            else:
-                ahora = datetime.utcnow()
+            # 🌟 ESTA ES LA CLAVE: Forzamos el reloj de Railway a hora de Argentina (UTC-3)
+            ahora_arg = datetime.utcnow() - timedelta(hours=3)
             
             momento_ideal_envio = fecha_turno_obj - timedelta(minutes=minutos_anticipacion)
             
-            # 🚨 LOGS DE DEPURACIÓN 🚨
+            # 🚨 LOGS DE DEPURACIÓN EXACTOS 🚨
             print(f"🔍 Evaluando turno {turno['id']}:")
-            print(f"   - Hora del sistema (ahora): {ahora.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   - Hora del sistema (Arg):   {ahora_arg.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"   - Hora del turno:           {fecha_turno_obj.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"   - Config anticipación:      {minutos_anticipacion} minutos")
             print(f"   - Momento en que dispara:   {momento_ideal_envio.strftime('%Y-%m-%d %H:%M:%S')}")
             
-            if ahora >= momento_ideal_envio and ahora < fecha_turno_obj:
+            # Condición de disparo
+            if ahora_arg >= momento_ideal_envio and ahora_arg < fecha_turno_obj:
                 print(f"🚀 ¡CONDICIÓN CUMPLIDA! Intentando enviar a {turno.get('cliente_nombre', 'Cliente')}...")
                 
                 res_comercio = supabase.table("comercios").select("evolution_instance").eq("id", comercio_id).execute()
