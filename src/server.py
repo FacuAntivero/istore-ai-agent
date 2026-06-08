@@ -24,8 +24,130 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
 
+# --- PLANIFICADOR DE NOTIFICACIONES INTEGRADO (CRON INTERNO) ---
+from cron_notificaciones import procesar_recordatorios, procesar_postventa
+
+async def planificador_interno():
+    """Bucle infinito que escanea de forma horaria la DB para despachar recordatorios y post-ventas."""
+    print("[Planificador] 🚀 Motor de notificaciones automáticas iniciado en segundo plano.")
+    while True:
+        try:
+            print("[Planificador] ⏰ Ejecutando escaneo automático de campañas listas...")
+            
+            # Ejecuta las sub-rutinas modulares de cron_notificaciones.py
+            # Al usar internamente .lte("fecha_envio", fecha_hoy), se enviará todo lo que
+            # corresponda al día actual sin importar la hora exacta en la que se reprogramó.
+            procesar_recordatorios()
+            procesar_postventa()
+            
+            # Duerme 1 hora exacta (3600 segundos) para optimizar el consumo de la base de datos
+            await asyncio.sleep(3600)
+                
+        except Exception as e:
+            print(f"[Planificador] ❌ Error crítico en el loop de notificaciones: {e}")
+            # Si hay un error de conexión, espera 1 minuto y vuelve a intentar para no romper el servicio
+            await asyncio.sleep(60)
+
+async def enviar_recordatorios_citas():
+    print("⏰ [Cron] Ejecutando revisión de recordatorios dinámicos...")
+    try:
+        ahora = datetime.utcnow()
+        # Traemos citas de los próximos 3 días que sigan pendientes de aviso
+        tres_dias_despues = ahora + timedelta(days=3)
+        
+        res = supabase.table("turnos_clientes") \
+            .select("*") \
+            .eq("estado", "pendiente") \
+            .eq("recordatorio_enviado", False) \
+            .gte("fecha_turno", ahora.isoformat()) \
+            .lt("fecha_turno", tres_dias_despues.isoformat()) \
+            .execute()
+            
+        turnos = res.data
+        if not turnos:
+            return
+
+        for turno in turnos:
+            comercio_id = turno["comercio_id"]
+            
+            # 1. Traemos cuántas horas de anticipación quiere este comercio específico
+            res_config = supabase.table("configuracion_comercios") \
+                .select("recordatorio_anticipacion_horas") \
+                .eq("comercio_id", comercio_id) \
+                .execute()
+            
+            horas_anticipacion = 24  # Valor por defecto si no configuró nada
+            if res_config.data and res_config.data[0].get("recordatorio_anticipacion_horas") is not None:
+                horas_anticipacion = int(res_config.data[0]["recordatorio_anticipacion_horas"])
+            
+            fecha_turno_obj = datetime.fromisoformat(turno["fecha_turno"])
+            
+            # 2. Calculamos el momento exacto en el que debería enviarse el mensaje
+            momento_ideal_envio = fecha_turno_obj - timedelta(hours=horas_anticipacion)
+            
+            # 3. ¿Ya llegó (o pasó) el momento de avisar, pero la cita todavía no ocurrió?
+            if ahora >= momento_ideal_envio and ahora < fecha_turno_obj:
+                
+                # Buscamos la instancia de Evolution de este comercio
+                res_comercio = supabase.table("comercios").select("evolution_instance").eq("id", comercio_id).execute()
+                if not res_comercio.data:
+                    continue
+                    
+                instance_name = res_comercio.data[0]["evolution_instance"]
+                telefono_cliente = turno["telefono"]
+                nombre_cliente = turno.get("cliente_nombre", "Cliente")
+                
+                # 4. Adaptamos el texto de forma natural según el tiempo que falta
+                hora_formateada = fecha_turno_obj.strftime("%H:%M")
+                
+                if horas_anticipacion >= 24:
+                    texto_tiempo = f"mañana a las *{hora_formateada} hs*"
+                elif horas_anticipacion == 1:
+                    texto_tiempo = f"en 1 hora (a las *{hora_formateada} hs*)"
+                else:
+                    texto_tiempo = f"en {horas_anticipacion} horas (a las *{hora_formateada} hs*)"
+                
+                mensaje_recordatorio = (
+                    f"¡Hola {nombre_cliente}! 👋\n\n"
+                    f"Te escribimos para recordarte tu cita agendada para {texto_tiempo}.\n\n"
+                    f"¡Te esperamos! Cualquier inconveniente por favor avisanos por este medio."
+                )
+                
+                if not telefono_cliente.endswith("@s.whatsapp.net"):
+                    telefono_cliente = f"{telefono_cliente}@s.whatsapp.net"
+                    
+                # 5. Despachamos el WhatsApp
+                enviar_mensaje_whatsapp(telefono_cliente, mensaje_recordatorio, instance_name)
+                
+                # 6. Marcamos como enviado
+                supabase.table("turnos_clientes").update({"recordatorio_enviado": True}).eq("id", turno["id"]).execute()
+                print(f"✅ [Recordatorio Dinámico] Enviado a {nombre_cliente} con {horas_anticipacion}h de anticipación.")
+                
+                await asyncio.sleep(2)
+                
+    except Exception as e:
+        print(f"❌ [Cron] Error en recordatorios dinámicos: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🚀 Arrancando planificador interno antiguo...")
+    asyncio.create_task(planificador_interno())
+    
+    print("⏰ Iniciando el motor de recordatorios de citas...")
+    scheduler = AsyncIOScheduler()
+    
+    # CAMBIO AQUÍ: Ahora corre en intervalos regulares cada 15 minutos
+    scheduler.add_job(enviar_recordatorios_citas, 'interval', minutes=15) 
+    scheduler.start()
+    
+    yield
+    
+    print("🛑 Apagando el motor de recordatorios...")
+    scheduler.shutdown()
+
 app = FastAPI(title="iStore AI Webhook", lifespan=lifespan)
 
+    
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -931,127 +1053,7 @@ async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: i
         print(f"❌ Error al completar turno {turno_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- PLANIFICADOR DE NOTIFICACIONES INTEGRADO (CRON INTERNO) ---
-from cron_notificaciones import procesar_recordatorios, procesar_postventa
-
-async def planificador_interno():
-    """Bucle infinito que escanea de forma horaria la DB para despachar recordatorios y post-ventas."""
-    print("[Planificador] 🚀 Motor de notificaciones automáticas iniciado en segundo plano.")
-    while True:
-        try:
-            print("[Planificador] ⏰ Ejecutando escaneo automático de campañas listas...")
-            
-            # Ejecuta las sub-rutinas modulares de cron_notificaciones.py
-            # Al usar internamente .lte("fecha_envio", fecha_hoy), se enviará todo lo que
-            # corresponda al día actual sin importar la hora exacta en la que se reprogramó.
-            procesar_recordatorios()
-            procesar_postventa()
-            
-            # Duerme 1 hora exacta (3600 segundos) para optimizar el consumo de la base de datos
-            await asyncio.sleep(3600)
-                
-        except Exception as e:
-            print(f"[Planificador] ❌ Error crítico en el loop de notificaciones: {e}")
-            # Si hay un error de conexión, espera 1 minuto y vuelve a intentar para no romper el servicio
-            await asyncio.sleep(60)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("🚀 Arrancando planificador interno antiguo...")
-    asyncio.create_task(planificador_interno())
-    
-    print("⏰ Iniciando el motor de recordatorios de citas...")
-    scheduler = AsyncIOScheduler()
-    
-    # CAMBIO AQUÍ: Ahora corre en intervalos regulares cada 15 minutos
-    scheduler.add_job(enviar_recordatorios_citas, 'interval', minutes=15) 
-    scheduler.start()
-    
-    yield
-    
-    print("🛑 Apagando el motor de recordatorios...")
-    scheduler.shutdown()
-
-async def enviar_recordatorios_citas():
-    print("⏰ [Cron] Ejecutando revisión de recordatorios dinámicos...")
-    try:
-        ahora = datetime.utcnow()
-        # Traemos citas de los próximos 3 días que sigan pendientes de aviso
-        tres_dias_despues = ahora + timedelta(days=3)
-        
-        res = supabase.table("turnos_clientes") \
-            .select("*") \
-            .eq("estado", "pendiente") \
-            .eq("recordatorio_enviado", False) \
-            .gte("fecha_turno", ahora.isoformat()) \
-            .lt("fecha_turno", tres_dias_despues.isoformat()) \
-            .execute()
-            
-        turnos = res.data
-        if not turnos:
-            return
-
-        for turno in turnos:
-            comercio_id = turno["comercio_id"]
-            
-            # 1. Traemos cuántas horas de anticipación quiere este comercio específico
-            res_config = supabase.table("configuracion_comercios") \
-                .select("recordatorio_anticipacion_horas") \
-                .eq("comercio_id", comercio_id) \
-                .execute()
-            
-            horas_anticipacion = 24  # Valor por defecto si no configuró nada
-            if res_config.data and res_config.data[0].get("recordatorio_anticipacion_horas") is not None:
-                horas_anticipacion = int(res_config.data[0]["recordatorio_anticipacion_horas"])
-            
-            fecha_turno_obj = datetime.fromisoformat(turno["fecha_turno"])
-            
-            # 2. Calculamos el momento exacto en el que debería enviarse el mensaje
-            momento_ideal_envio = fecha_turno_obj - timedelta(hours=horas_anticipacion)
-            
-            # 3. ¿Ya llegó (o pasó) el momento de avisar, pero la cita todavía no ocurrió?
-            if ahora >= momento_ideal_envio and ahora < fecha_turno_obj:
-                
-                # Buscamos la instancia de Evolution de este comercio
-                res_comercio = supabase.table("comercios").select("evolution_instance").eq("id", comercio_id).execute()
-                if not res_comercio.data:
-                    continue
-                    
-                instance_name = res_comercio.data[0]["evolution_instance"]
-                telefono_cliente = turno["telefono"]
-                nombre_cliente = turno.get("cliente_nombre", "Cliente")
-                
-                # 4. Adaptamos el texto de forma natural según el tiempo que falta
-                hora_formateada = fecha_turno_obj.strftime("%H:%M")
-                
-                if horas_anticipacion >= 24:
-                    texto_tiempo = f"mañana a las *{hora_formateada} hs*"
-                elif horas_anticipacion == 1:
-                    texto_tiempo = f"en 1 hora (a las *{hora_formateada} hs*)"
-                else:
-                    texto_tiempo = f"en {horas_anticipacion} horas (a las *{hora_formateada} hs*)"
-                
-                mensaje_recordatorio = (
-                    f"¡Hola {nombre_cliente}! 👋\n\n"
-                    f"Te escribimos para recordarte tu cita agendada para {texto_tiempo}.\n\n"
-                    f"¡Te esperamos! Cualquier inconveniente por favor avisanos por este medio."
-                )
-                
-                if not telefono_cliente.endswith("@s.whatsapp.net"):
-                    telefono_cliente = f"{telefono_cliente}@s.whatsapp.net"
-                    
-                # 5. Despachamos el WhatsApp
-                enviar_mensaje_whatsapp(telefono_cliente, mensaje_recordatorio, instance_name)
-                
-                # 6. Marcamos como enviado
-                supabase.table("turnos_clientes").update({"recordatorio_enviado": True}).eq("id", turno["id"]).execute()
-                print(f"✅ [Recordatorio Dinámico] Enviado a {nombre_cliente} con {horas_anticipacion}h de anticipación.")
-                
-                await asyncio.sleep(2)
-                
-    except Exception as e:
-        print(f"❌ [Cron] Error en recordatorios dinámicos: {e}")
-        
+ 
 @app.get("/api/admin/forzar-cron-postventa")
 async def forzar_cron_postventa_endpoint():
     """Endpoint de desarrollo para ejecutar el cron sin esperar a las 11 AM."""
