@@ -74,17 +74,15 @@ async def enviar_recordatorios_citas():
         for turno in turnos:
             comercio_id = turno["comercio_id"]
             
-            # 2. Traemos la configuración de minutos de este comercio específico
             res_config = supabase.table("configuracion_comercios") \
                 .select("minutos_anticipacion_recordatorio") \
                 .eq("comercio_id", comercio_id) \
                 .execute()
             
-            minutos_anticipacion = 30  # Valor de respaldo predeterminado (30 min)
+            minutos_anticipacion = 30
             if res_config.data and res_config.data[0].get("minutos_anticipacion_recordatorio") is not None:
                 minutos_anticipacion = int(res_config.data[0]["minutos_anticipacion_recordatorio"])
             
-            # 3. Parsear fecha del turno y normalizar zona horaria para evitar crashes
             fecha_turno_obj = datetime.fromisoformat(turno["fecha_turno"].replace("Z", "+00:00"))
             
             if fecha_turno_obj.tzinfo is not None:
@@ -92,34 +90,37 @@ async def enviar_recordatorios_citas():
             else:
                 ahora = datetime.utcnow()
             
-            # 4. Calculamos el momento ideal del envío restando los minutos configurados
             momento_ideal_envio = fecha_turno_obj - timedelta(minutes=minutos_anticipacion)
             
-            # 5. ¿Ya es hora de avisar (o ya pasó la hora de aviso) pero el turno aún no ocurrió?
+            # 🚨 LOGS DE DEPURACIÓN PARA VER LA MATEMÁTICA EN RAILWAY 🚨
+            print(f"🔍 Evaluando turno {turno['id']}:")
+            print(f"   - Hora del sistema (ahora): {ahora.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   - Hora del turno:           {fecha_turno_obj.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   - Config anticipación:      {minutos_anticipacion} minutos")
+            print(f"   - Momento en que dispara:   {momento_ideal_envio.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Condición de disparo
             if ahora >= momento_ideal_envio and ahora < fecha_turno_obj:
+                print(f"🚀 ¡CONDICIÓN CUMPLIDA! Intentando enviar a {turno.get('cliente_nombre', 'Cliente')}...")
                 
-                # Buscamos la instancia de Evolution vinculada al comercio
+                # Buscamos la instancia de Evolution
                 res_comercio = supabase.table("comercios").select("evolution_instance").eq("id", comercio_id).execute()
-                if not res_comercio.data:
+                if not res_comercio.data or not res_comercio.data[0].get("evolution_instance"):
+                    print(f"⚠️ Falló: El comercio {comercio_id} no tiene Evolution Instance.")
                     continue
                     
                 instance_name = res_comercio.data[0]["evolution_instance"]
-                if not instance_name:
-                    print(f"⚠️ Comercio {comercio_id} no tiene una instancia de WhatsApp configurada.")
-                    continue
-
                 telefono_cliente = turno["telefono"]
                 nombre_cliente = turno.get("cliente_nombre", "Cliente")
                 hora_formateada = fecha_turno_obj.strftime("%H:%M")
                 
-                # 6. Redacción dinámica y natural del mensaje según los minutos estipulados
-                if minutos_anticipacion >= 1440:  # 24 horas o más
+                if minutos_anticipacion >= 1440:
                     texto_tiempo = f"mañana a las *{hora_formateada} hs*"
-                elif minutos_anticipacion == 60:  # 1 hora exacta
+                elif minutos_anticipacion == 60:
                     texto_tiempo = f"en 1 hora (a las *{hora_formateada} hs*)"
-                elif minutos_anticipacion < 60:   # 15, 30 minutos, etc.
+                elif minutos_anticipacion < 60:
                     texto_tiempo = f"en {minutos_anticipacion} minutos (a las *{hora_formateada} hs*)"
-                else:                             # Cualquier otro rango intermedio en horas
+                else:
                     horas_calculadas = minutos_anticipacion // 60
                     texto_tiempo = f"en {horas_calculadas} horas (a las *{hora_formateada} hs*)"
                 
@@ -132,18 +133,14 @@ async def enviar_recordatorios_citas():
                 if not telefono_cliente.endswith("@s.whatsapp.net"):
                     telefono_cliente = f"{telefono_cliente}@s.whatsapp.net"
                     
-                # 7. Despacho e impacto en base de datos
+                # Despacho
                 enviar_mensaje_whatsapp(telefono_cliente, mensaje_recordatorio, instance_name)
                 
-                supabase.table("turnos_clientes") \
-                    .update({"recordatorio_enviado": True}) \
-                    .eq("id", turno["id"]) \
-                    .execute()
-                    
-                print(f"✅ [Recordatorio Automatizado] Enviado a {nombre_cliente} ({minutos_anticipacion} min de anticipación).")
-                
-                # Anti-spam preventivo para ráfagas de mensajes
+                supabase.table("turnos_clientes").update({"recordatorio_enviado": True}).eq("id", turno["id"]).execute()
+                print(f"✅ Enviado a {nombre_cliente}.")
                 await asyncio.sleep(2)
+            else:
+                print(f"⏳ Aún no es el momento (o ya pasó). Se ignoró el turno {turno['id']}.")
                 
     except Exception as e:
         print(f"❌ [Cron] Error crítico en ejecutor de recordatorios dinámicos: {e}")
