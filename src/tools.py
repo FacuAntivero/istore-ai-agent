@@ -2,14 +2,16 @@ import dateparser
 import os
 import requests
 import json
+from datetime import datetime
 from database import supabase
 
 def consultar_inventario(modelo_corregido: str, comercio_id: int, telefono_cliente: str) -> str:
     """Busca stock de un celular devolviendo todos sus atributos útiles y cantidad."""
     print(f"\n[Sistema] 🔍 Buscando en BD: {modelo_corregido} - Comercio: {comercio_id}")
     try:
+        # CAMBIO ACA: Select * para traer absolutamente toda la fila (incluyendo accesorios, notas, etc)
         response = supabase.table("inventario_celulares") \
-            .select("id, modelo, capacidad, estado_estetico, bateria, precio, stock") \
+            .select("*") \
             .eq("comercio_id", int(comercio_id)) \
             .ilike("modelo", f"%{modelo_corregido}%") \
             .gt("stock", 0) \
@@ -53,7 +55,7 @@ def consultar_horarios(comercio_id: int, telefono_cliente: str) -> str:
 
 def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int = None, comercio_id: int = None) -> str:
     """Agenda o modifica una cita reservando el stock numérico del inventario."""
-    print(f"\n[Sistema] 📅 Ejecutando agendar_cita: {cliente_nombre} ({telefono})")
+    print(f"\n[Sistema] 📅 Ejecutando agendar_cita: {cliente_nombre} ({telefono}) con fecha {fecha_turno}")
     try:
         try:
             celular_id = int(celular_id) if celular_id and int(celular_id) > 0 else None
@@ -61,8 +63,12 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
         except ValueError:
             celulares_ids_nuevos = []
 
-        settings = {'PREFER_DATES_FROM': 'future', 'TIMEZONE': 'America/Argentina/Buenos_Aires'}
-        fecha_objetivo = dateparser.parse(fecha_turno, languages=['es'], settings=settings)
+        # CAMBIO ACA: Priorizamos el formato estricto ISO que le pedimos a Gemini. Si falla, cae en dateparser forzando DMY (Día/Mes/Año)
+        try:
+            fecha_objetivo = datetime.strptime(fecha_turno, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            settings = {'PREFER_DATES_FROM': 'future', 'TIMEZONE': 'America/Argentina/Buenos_Aires', 'DATE_ORDER': 'DMY'}
+            fecha_objetivo = dateparser.parse(fecha_turno, languages=['es'], settings=settings)
 
         if not fecha_objetivo:
             return f"Error técnico: No se pudo formatear la fecha '{fecha_turno}'."
@@ -128,7 +134,7 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
             }
             supabase.table("turnos_clientes").insert(insert_payload).execute()
 
-            return f"¡Perfecto! Tu cita quedó agendada para el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')} hs. ¡Te esperamos!"
+            return f"¡Perfecto! Tu cita quedó agendada para el {fecha_objetivo.strftime('%d/%m a las %H:%M')} hs. ¡Te esperamos!"
 
     except Exception as e:
         print(f"[Falla Crítica] ❌ Error en agendar_cita: {e}")
