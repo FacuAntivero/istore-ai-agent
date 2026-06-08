@@ -30,127 +30,7 @@ load_dotenv()
 # Importamos SOLO lo que necesitamos del cron viejo para que no haya conflictos
 from cron_notificaciones import procesar_postventa
 
-async def planificador_interno():
-    """Bucle que escanea de forma horaria la DB para despachar post-ventas."""
-    print("[Planificador] 🚀 Motor de post-ventas iniciado en segundo plano.")
-    while True:
-        try:
-            print("[Planificador] ⏰ Ejecutando escaneo automático de campañas post-venta...")
-            # Solo dejamos el de postventa, ya que las citas las maneja el nuevo motor por minutos
-            procesar_postventa()
-            await asyncio.sleep(3600) # Duerme 1 hora
-        except Exception as e:
-            print(f"[Planificador] ❌ Error crítico: {e}")
-            await asyncio.sleep(60)
-
-# --- NUEVO MOTOR DE RECORDATORIOS POR MINUTOS ---
-async def enviar_recordatorios_citas():
-    print("⏰ [Cron] Ejecutando revisión de recordatorios dinámicos por minutos...")
-    try:
-        # 1. Filtro súper amplio: Traemos todo lo pendiente desde ayer
-        # para que el desfasaje horario del servidor no nos oculte los turnos.
-        ayer = (datetime.utcnow() - timedelta(days=1)).isoformat()
-        
-        res = supabase.table("turnos_clientes") \
-            .select("*") \
-            .eq("estado", "pendiente") \
-            .eq("recordatorio_enviado", False) \
-            .gte("fecha_turno", ayer) \
-            .execute()
-            
-        turnos = res.data
-        if not turnos:
-            print("   - No hay turnos pendientes para evaluar.")
-            return
-
-        for turno in turnos:
-            comercio_id = turno["comercio_id"]
-            
-            res_config = supabase.table("configuracion_comercios") \
-                .select("minutos_anticipacion_recordatorio") \
-                .eq("comercio_id", comercio_id) \
-                .execute()
-            
-            minutos_anticipacion = 30
-            if res_config.data and res_config.data[0].get("minutos_anticipacion_recordatorio") is not None:
-                minutos_anticipacion = int(res_config.data[0]["minutos_anticipacion_recordatorio"])
-            
-            # Limpiamos la fecha que viene de Supabase por si trae una "Z"
-            fecha_turno_str = turno["fecha_turno"].replace("Z", "")
-            fecha_turno_obj = datetime.fromisoformat(fecha_turno_str)
-            
-            # 🌟 ESTA ES LA CLAVE: Forzamos el reloj de Railway a hora de Argentina (UTC-3)
-            ahora_arg = datetime.utcnow() - timedelta(hours=3)
-            
-            momento_ideal_envio = fecha_turno_obj - timedelta(minutes=minutos_anticipacion)
-            
-            # 🚨 LOGS DE DEPURACIÓN EXACTOS 🚨
-            print(f"🔍 Evaluando turno {turno['id']}:")
-            print(f"   - Hora del sistema (Arg):   {ahora_arg.strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"   - Hora del turno:           {fecha_turno_obj.strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"   - Config anticipación:      {minutos_anticipacion} minutos")
-            print(f"   - Momento en que dispara:   {momento_ideal_envio.strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            # Condición de disparo
-            if ahora_arg >= momento_ideal_envio and ahora_arg < fecha_turno_obj:
-                print(f"🚀 ¡CONDICIÓN CUMPLIDA! Intentando enviar a {turno.get('cliente_nombre', 'Cliente')}...")
-                
-                res_comercio = supabase.table("comercios").select("evolution_instance").eq("id", comercio_id).execute()
-                if not res_comercio.data or not res_comercio.data[0].get("evolution_instance"):
-                    print(f"⚠️ Falló: El comercio {comercio_id} no tiene Evolution Instance.")
-                    continue
-                    
-                instance_name = res_comercio.data[0]["evolution_instance"]
-                telefono_cliente = turno["telefono"]
-                nombre_cliente = turno.get("cliente_nombre", "Cliente")
-                hora_formateada = fecha_turno_obj.strftime("%H:%M")
-                
-                if minutos_anticipacion >= 1440:
-                    texto_tiempo = f"mañana a las *{hora_formateada} hs*"
-                elif minutos_anticipacion == 60:
-                    texto_tiempo = f"en 1 hora (a las *{hora_formateada} hs*)"
-                elif minutos_anticipacion < 60:
-                    texto_tiempo = f"en {minutos_anticipacion} minutos (a las *{hora_formateada} hs*)"
-                else:
-                    horas_calculadas = minutos_anticipacion // 60
-                    texto_tiempo = f"en {horas_calculadas} horas (a las *{hora_formateada} hs*)"
-                
-                mensaje_recordatorio = (
-                    f"¡Hola {nombre_cliente}! 👋\n\n"
-                    f"Te escribimos para recordarte tu cita agendada para {texto_tiempo}.\n\n"
-                    f"¡Te esperamos! Cualquier inconveniente por favor avisanos por este medio."
-                )
-                
-                if not telefono_cliente.endswith("@s.whatsapp.net"):
-                    telefono_cliente = f"{telefono_cliente}@s.whatsapp.net"
-                    
-                enviar_mensaje_whatsapp(telefono_cliente, mensaje_recordatorio, instance_name)
-                supabase.table("turnos_clientes").update({"recordatorio_enviado": True}).eq("id", turno["id"]).execute()
-                print(f"✅ Enviado a {nombre_cliente}.")
-                await asyncio.sleep(2)
-            else:
-                print(f"⏳ Aún no es el momento (o ya pasó). Se ignoró el turno {turno['id']}.")
-                
-    except Exception as e:
-        print(f"❌ [Cron] Error crítico: {e}")
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Lanzamos el planificador viejo (ahora solo postventa)
-    asyncio.create_task(planificador_interno())
-    
-    print("⏰ Iniciando el motor de recordatorios por minutos...")
-    scheduler = AsyncIOScheduler()
-    # ✅ Revisión cada 2 minutos (Equilibrio perfecto entre precisión y rendimiento)
-    scheduler.add_job(enviar_recordatorios_citas, 'interval', minutes=2) 
-    scheduler.start()
-    
-    yield
-    
-    print("🛑 Apagando el motor de recordatorios...")
-    scheduler.shutdown()
-
-app = FastAPI(title="iStore AI Webhook", lifespan=lifespan)
+app = FastAPI(title="iStore AI Webhook")
     
 app.add_middleware(
     CORSMiddleware,
@@ -163,6 +43,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+class PayloadWebhookMensaje(BaseModel):
+    tipo: str          # "cita" o "postventa"
+    registro_id: int   # El ID en la base de datos
 
 class NgrokHeaderMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
@@ -172,15 +55,103 @@ class NgrokHeaderMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(NgrokHeaderMiddleware)
 
-# ⚡ RUTA DE PRUEBA MANUAL: Para forzar el disparo desde el navegador
-@app.get("/api/test-forzar-recordatorios")
-async def test_forzar_recordatorios():
-    print("⚡ [Manual] Forzando ejecución del motor de recordatorios...")
+def programar_evento_futuro(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
+    """
+    Se comunica con Upstash QStash para agendar un webhook en el futuro.
+    """
+    QSTASH_TOKEN = "eyJVc2VySUQiOiI0YTRjYzljZi1jMzA1LTRlNzMtYjhkYS01ZWNiNzc1MjNlMTciLCJQYXNzd29yZCI6IjgyOGQ5MTE0ZDdkNjQ5OGZhMWIxYjI3OTQ5OTcwZjczIn0=" # Reemplazar con tu token real
+    URL_RAILWAY = "https://istore-ai-agent-production.up.railway.app/" # Reemplazar con tu URL de Railway
+    
+    url_qstash = f"https://qstash.upstash.io/v2/publish/{URL_RAILWAY}/api/webhooks/disparar-mensaje-programado"
+    
+    # Calculamos cuántos segundos faltan desde AHORA hasta la fecha de disparo
+    ahora_utc = datetime.now(timezone.utc)
+    
+    # Si la fecha de disparo viene sin zona horaria, asumimos UTC para evitar errores
+    if fecha_disparo.tzinfo is None:
+        fecha_disparo = fecha_disparo.replace(tzinfo=timezone.utc)
+        
+    diferencia = (fecha_disparo - ahora_utc).total_seconds()
+    
+    # Si la fecha ya pasó o es ahora mismo, que dispare en 5 segundos
+    delay_segundos = max(int(diferencia), 5)
+
+    headers = {
+        "Authorization": f"Bearer {QSTASH_TOKEN}",
+        "Content-Type": "application/json",
+        "Upstash-Delay": f"{delay_segundos}s" 
+    }
+    
+    payload = {
+        "tipo": tipo_evento,
+        "registro_id": registro_id
+    }
+    
     try:
-        await enviar_recordatorios_citas()
-        return {"status": "success", "message": "Motor ejecutado. Revisá los logs de Railway."}
+        res = requests.post(url_qstash, headers=headers, json=payload)
+        if res.status_code == 201:
+            print(f"✅ [QStash] Evento programado: {tipo_evento} ID {registro_id} en {delay_segundos} segundos.")
+        else:
+            print(f"❌ [QStash] Error al programar: {res.text}")
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        print(f"❌ [QStash] Error de red: {e}")
+
+# 3. EL RECEPTOR DEL WEBHOOK (El que ejecuta el disparo final)
+@app.post("/api/webhooks/disparar-mensaje-programado")
+async def webhook_disparar_mensaje_programado(data: PayloadWebhookMensaje, background_tasks: BackgroundTasks):
+    print(f"🚀 [Webhook] Recibido desde QStash para {data.tipo} ID: {data.registro_id}")
+    
+    # Lo pasamos a segundo plano para que QStash reciba un "200 OK" al instante
+    background_tasks.add_task(procesar_envio_inmediato, data.tipo, data.registro_id)
+    return {"status": "accepted"}
+
+# 4. EL EJECUTOR (Lee la DB por ID y despacha)
+def procesar_envio_inmediato(tipo: str, registro_id: int):
+    try:
+        if tipo == "cita":
+            res = supabase.table("turnos_clientes").select("*, comercio:comercio_id(evolution_instance)").eq("id", registro_id).eq("estado", "pendiente").eq("recordatorio_enviado", False).execute()
+            if not res.data: 
+                print(f"⚠️ [Ejecutor] Cita ID {registro_id} ignorada (ya enviada, cancelada o no existe).")
+                return
+            
+            turno = res.data[0]
+            instance_name = turno.get("comercio", {}).get("evolution_instance")
+            if not instance_name: return
+            
+            fecha_obj = datetime.fromisoformat(turno["fecha_turno"].replace("Z", ""))
+            hora_formateada = fecha_obj.strftime("%H:%M")
+            
+            mensaje = (
+                f"¡Hola {turno.get('cliente_nombre', 'Cliente')}! 👋\n\n"
+                f"Te escribimos para recordarte tu cita programada a las *{hora_formateada} hs*.\n\n"
+                f"¡Te esperamos! Ante cualquier inconveniente por favor avisanos."
+            )
+            
+            enviar_mensaje_whatsapp(turno["telefono"], mensaje, instance_name)
+            supabase.table("turnos_clientes").update({"recordatorio_enviado": True}).eq("id", registro_id).execute()
+            print(f"✅ Recordatorio enviado a {turno.get('cliente_nombre')}")
+
+        elif tipo == "postventa":
+            res = supabase.table("cola_mensajes_postventa").select("*, comercio:comercio_id(evolution_instance)").eq("id", registro_id).eq("estado", "pendiente").execute()
+            if not res.data:
+                print(f"⚠️ [Ejecutor] Postventa ID {registro_id} ignorada (no pendiente o no existe).")
+                return
+            
+            msg = res.data[0]
+            instance_name = msg.get("comercio", {}).get("evolution_instance")
+            if not instance_name: return
+            
+            texto_ws = msg.get("mensaje_texto")
+            if not texto_ws:
+                equipos = msg.get("equipos_detalle", "equipo")
+                texto_ws = f"¡Hola {msg.get('cliente_nombre', '')}! Gracias por tu compra de {equipos}. ¡Estamos a tu disposición!"
+                
+            enviar_mensaje_whatsapp(msg["telefono"], texto_ws, instance_name)
+            supabase.table("cola_mensajes_postventa").update({"estado": "enviado"}).eq("id", registro_id).execute()
+            print(f"✅ Post-Venta enviada a {msg.get('cliente_nombre')}")
+
+    except Exception as e:
+        print(f"❌ [Ejecutor] Error crítico: {e}")
 
 class EditarPostVentaInput(BaseModel):
     mensaje_texto: str
@@ -892,7 +863,7 @@ async def webhook_mercadopago(request: Request):
     except Exception as e:
         print(f"❌ Error procesando Webhook de MP: {e}")
         return {"status": "error", "detail": str(e)}
-
+    
 async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str, celulares_ids: list, estrategia_o_plantilla):
     print(f"\n--- 🚀 INICIANDO POST-VENTA PARA: {cliente_nombre} ---")
     try:
@@ -963,22 +934,28 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
                 dias_delay = 3
                 texto_campana = f"¡Hola {primer_nombre}! Gracias por tu compra de {equipos_string} con nosotros. ¡Estamos a tu disposición!"
 
-        # 4. Insertar en la cola con la fecha correcta
-        fecha_disparo = (datetime.now() + timedelta(days=dias_delay)).strftime("%Y-%m-%d")
+        # 4. 🌟 CAMBIO CLAVE: Calculamos la fecha y HORA EXACTA del disparo
+        fecha_disparo_dt = datetime.now() + timedelta(days=dias_delay)
 
         payload_postventa = {
             "comercio_id": comercio_id,
             "cliente_nombre": cliente_nombre,
             "telefono": telefono,
             "equipos_detalle": equipos_string,
-            "estrategia": nombre_estrategia, # Guarda el nombre custom o el legacy
-            "fecha_envio": fecha_disparo,
+            "estrategia": nombre_estrategia, 
+            "fecha_envio": fecha_disparo_dt.isoformat(),  # Guardamos con hora, minuto y segundo
             "estado": "pendiente",
             "mensaje_texto": texto_campana  
         }
         
         res_insert = supabase.table("cola_mensajes_postventa").insert(payload_postventa).execute()
-        print(f"🎉 ¡Post-Venta Agendado! Estrategia usada: {nombre_estrategia}")
+        
+        # 🌟 EL GATILLO DE UPSTASH: Programamos el evento para el futuro exacto
+        if res_insert.data:
+            nuevo_id = res_insert.data[0]["id"]
+            programar_evento_futuro("postventa", nuevo_id, fecha_disparo_dt)
+            
+        print(f"🎉 ¡Post-Venta Agendado con precisión de minutos! Estrategia usada: {nombre_estrategia}")
         return True  # ✅ Retorna True porque se agendó con éxito
 
     except Exception as e:
@@ -1065,21 +1042,12 @@ async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: i
     except Exception as e:
         print(f"❌ Error al completar turno {turno_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
- 
-@app.get("/api/admin/forzar-cron-postventa")
-async def forzar_cron_postventa_endpoint():
-    """Endpoint de desarrollo para ejecutar el cron sin esperar a las 11 AM."""
-    try:
-        procesar_postventa()
-        return {"status": "success", "message": "Cron forzado ejecutado. Revisá la terminal para ver los resultados."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
     
 @app.put("/api/postventa/{id_registro}")
 async def editar_mensaje_postventa(id_registro: int, datos: EditarPostVentaInput):
     """Permite al comerciante modificar el texto y la fecha de un mensaje programado."""
     try:
+        # 1. Actualizamos en la base de datos
         res = supabase.table("cola_mensajes_postventa") \
             .update({
                 "mensaje_texto": datos.mensaje_texto,
@@ -1092,6 +1060,26 @@ async def editar_mensaje_postventa(id_registro: int, datos: EditarPostVentaInput
         if not res.data:
             raise HTTPException(status_code=404, detail="Registro no encontrado")
             
+        # 2. 🌟 REPROGRAMAMOS EL GATILLO CON LA NUEVA FECHA
+        try:
+            # Detectamos si el front nos manda fecha con hora (ISO) o solo el día (YYYY-MM-DD)
+            if "T" in datos.fecha_envio or " " in datos.fecha_envio:
+                # Si trae hora, la respetamos exacta
+                nueva_fecha_str = datos.fecha_envio.replace("Z", "").replace(" ", "T")
+                nueva_fecha_obj = datetime.fromisoformat(nueva_fecha_str)
+            else:
+                # Si solo trae el día, le ponemos las 12:00 del mediodía por defecto para no enviar de madrugada
+                nueva_fecha_obj = datetime.strptime(datos.fecha_envio, "%Y-%m-%d").replace(hour=12, minute=0)
+            
+            # Avisamos a Upstash del nuevo horario
+            programar_evento_futuro("postventa", id_registro, nueva_fecha_obj)
+            print(f"🔄 Gatillo de Post-Venta ID {id_registro} reprogramado para {nueva_fecha_obj}")
+            
+        except Exception as e:
+            print(f"⚠️ Error al reprogramar QStash (el registro en BD se actualizó igual): {e}")
+
         return {"status": "success", "message": "Mensaje actualizado correctamente", "data": res.data}
+        
     except Exception as e:
+        print(f"❌ Error al editar postventa: {e}")
         raise HTTPException(status_code=500, detail=str(e))

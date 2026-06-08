@@ -2,7 +2,7 @@ import dateparser
 import os
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from database import supabase
 
 def consultar_inventario(modelo_corregido: str, comercio_id: int, telefono_cliente: str) -> str:
@@ -54,7 +54,7 @@ def consultar_horarios(comercio_id: int, telefono_cliente: str) -> str:
         return "SISTEMA_DELAY: No se pudieron leer los horarios. Ya notificamos automáticamente a un asesor humano. Pídele disculpas al cliente de forma muy cercana y dile que un compañero del local lo atenderá enseguida."
 
 def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int = None, comercio_id: int = None) -> str:
-    """Agenda o modifica una cita reservando el stock numérico del inventario."""
+    """Agenda o modifica una cita reservando el stock y programa el recordatorio exacto."""
     print(f"\n[Sistema] 📅 Ejecutando agendar_cita: {cliente_nombre} ({telefono}) con fecha {fecha_turno}")
     try:
         try:
@@ -63,7 +63,6 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
         except ValueError:
             celulares_ids_nuevos = []
 
-        # CAMBIO ACA: Priorizamos el formato estricto ISO que le pedimos a Gemini. Si falla, cae en dateparser forzando DMY (Día/Mes/Año)
         try:
             fecha_objetivo = datetime.strptime(fecha_turno, "%Y-%m-%d %H:%M:%S")
         except ValueError:
@@ -75,6 +74,15 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
 
         fecha_iso = fecha_objetivo.strftime("%Y-%m-%d %H:%M:%S")
 
+        # --- 🌟 NUEVO: Calculamos en qué momento exacto hay que mandar el recordatorio ---
+        config_res = supabase.table("configuracion_comercios").select("minutos_anticipacion_recordatorio").eq("comercio_id", int(comercio_id)).execute()
+        minutos_anticipacion = 30 # Valor por defecto
+        if config_res.data and config_res.data[0].get("minutos_anticipacion_recordatorio") is not None:
+            minutos_anticipacion = int(config_res.data[0]["minutos_anticipacion_recordatorio"])
+            
+        fecha_disparo_recordatorio = fecha_objetivo - timedelta(minutes=minutos_anticipacion)
+        # ---------------------------------------------------------------------------------
+
         turno_existente = supabase.table("turnos_clientes") \
             .select("*") \
             .eq("telefono", telefono) \
@@ -84,18 +92,17 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
         if turno_existente.data:
             turno_viejo = turno_existente.data[0]
             viejos_ids = turno_viejo.get("celulares_ids") or []
+            turno_id = turno_viejo["id"]
 
             ids_a_liberar = [vid for vid in viejos_ids if vid not in celulares_ids_nuevos]
             ids_a_reservar = [nid for nid in celulares_ids_nuevos if nid not in viejos_ids]
 
-            # 1. Devolver el stock de los equipos que ya no quiere
             for vid in ids_a_liberar:
                 item = supabase.table("inventario_celulares").select("stock").eq("id", vid).execute()
                 if item.data:
                     nuevo_stock = item.data[0]["stock"] + 1
                     supabase.table("inventario_celulares").update({"stock": nuevo_stock}).eq("id", vid).execute()
                 
-            # 2. Restar el stock de los nuevos equipos reservados
             for nid in ids_a_reservar:
                 item = supabase.table("inventario_celulares").select("stock").eq("id", nid).execute()
                 if item.data and item.data[0]["stock"] > 0:
@@ -109,12 +116,14 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
                 "fecha_turno": fecha_iso,
                 "celulares_ids": celulares_ids_nuevos
             }
-            supabase.table("turnos_clientes").update(update_payload).eq("id", turno_viejo["id"]).execute()
+            supabase.table("turnos_clientes").update(update_payload).eq("id", turno_id).execute()
+            
+            # 🌟 GATILLO: Reprogramamos el recordatorio porque cambió la fecha
+            _programar_upstash_desde_tools("cita", turno_id, fecha_disparo_recordatorio)
 
             return f"¡Cita modificada! Quedaste agendado para el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')}."
 
         else:
-            # 1. Restar el stock del equipo reservado (Nuevo turno)
             for nid in celulares_ids_nuevos:
                 item = supabase.table("inventario_celulares").select("stock").eq("id", nid).execute()
                 if item.data and item.data[0]["stock"] > 0:
@@ -132,7 +141,12 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
                 "tipo_registro": "cita",
                 "estado": "pendiente"
             }
-            supabase.table("turnos_clientes").insert(insert_payload).execute()
+            res_insert = supabase.table("turnos_clientes").insert(insert_payload).execute()
+
+            # 🌟 GATILLO: Programamos el recordatorio del nuevo turno
+            if res_insert.data:
+                nuevo_turno_id = res_insert.data[0]["id"]
+                _programar_upstash_desde_tools("cita", nuevo_turno_id, fecha_disparo_recordatorio)
 
             return f"¡Perfecto! Tu cita quedó agendada para el {fecha_objetivo.strftime('%d/%m a las %H:%M')} hs. ¡Te esperamos!"
 
@@ -140,7 +154,38 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
         print(f"[Falla Crítica] ❌ Error en agendar_cita: {e}")
         solicitar_asistencia_humana(f"Falla al intentar agendar un turno para {cliente_nombre}.", telefono, comercio_id)
         return "SISTEMA_DELAY: Hubo un problema al guardar el turno. Notificamos al local para confirmar la cita a mano."
+
+# --- AGREGAR ESTA FUNCIÓN AL FINAL DE TU ARCHIVO tools.py ---
+def _programar_upstash_desde_tools(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
+    """
+    Función auxiliar para agendar el recordatorio en QStash desde las tools del bot.
+    """
+    QSTASH_TOKEN = "TU_TOKEN_GRATUITO_DE_UPSTASH" # Acordate de reemplazar esto
+    URL_RAILWAY = "https://tu-url-de-railway.up.railway.app" # Y esto
     
+    url_qstash = f"https://qstash.upstash.io/v2/publish/{URL_RAILWAY}/api/webhooks/disparar-mensaje-programado"
+    
+    ahora_utc = datetime.now(timezone.utc)
+    if fecha_disparo.tzinfo is None:
+        fecha_disparo = fecha_disparo.replace(tzinfo=timezone.utc)
+        
+    diferencia = (fecha_disparo - ahora_utc).total_seconds()
+    delay_segundos = max(int(diferencia), 5) # Si ya pasó la hora, que dispare en 5 segs
+
+    headers = {
+        "Authorization": f"Bearer {QSTASH_TOKEN}",
+        "Content-Type": "application/json",
+        "Upstash-Delay": f"{delay_segundos}s" 
+    }
+    
+    payload = {"tipo": tipo_evento, "registro_id": registro_id}
+    
+    try:
+        requests.post(url_qstash, headers=headers, json=payload)
+        print(f"✅ [QStash Tool] Cita ID {registro_id} programada para avisar en {delay_segundos} segundos.")
+    except Exception as e:
+        print(f"❌ [QStash Tool] Error al programar: {e}")
+            
 def obtener_configuracion_comercio(comercio_id: int) -> dict:
     """Trae las políticas personalizadas del comercio desde la base de datos."""
     try:
