@@ -55,9 +55,9 @@ class NgrokHeaderMiddleware(BaseHTTPMiddleware):
         return response
     
 class NumeroExcluidoInput(BaseModel):
-    comercio_id: int # Ajustalo a int si tus IDs de comercio son numéricos
+    comercio_id: int
     telefono: str
-    descripcion: Optional[str] = None
+    descripcion: Optional[str] = ""
     
 app.add_middleware(NgrokHeaderMiddleware)
 
@@ -65,42 +65,38 @@ _lock_whatsapp = threading.Lock()
 _ultimo_envio_timestamp = 0.0
 
 @app.get("/api/numeros-excluidos/{comercio_id}")
-async def obtener_numeros_excluidos(comercio_id: str):
+async def get_numeros_excluidos(comercio_id: int):
     try:
-        res = supabase.table("numeros_excluidos") \
-            .select("id, telefono, descripcion, created_at") \
-            .eq("comercio_id", comercio_id) \
-            .order("created_at", ascending=False) \
-            .execute()
+        # Hacemos la consulta y retornamos explícitamente .data
+        res = supabase.table("numeros_excluidos").select("*").eq("comercio_id", comercio_id).execute()
         return res.data
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al obtener números excluidos: {str(e)}")
+        print(f"Error en GET numeros-excluidos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-# 3. Endpoint para AGREGAR un número (React hará un POST al darle a "Guardar")
 @app.post("/api/numeros-excluidos")
-async def crear_numero_excluido(datos: NumeroExcluidoInput):
+async def add_numero_excluido(payload: NumeroExcluidoInput):
     try:
-        # Limpiamos el teléfono por las dudas (sacamos espacios, guiones o el +)
-        telefono_limpio = "".join(filter(str.isdigit, datos.telefono))
-        
-        res = supabase.table("numeros_excluidos").insert({
-            "comercio_id": datos.comercio_id,
-            "telefono": telefono_limpio,
-            "descripcion": datos.descripcion
-        }).execute()
-        
-        return {"status": "success", "data": res.data}
+        # Armamos el diccionario manualmente para evitar conflictos de versiones en Pydantic
+        data_insert = {
+            "comercio_id": payload.comercio_id,
+            "telefono": payload.telefono,
+            "descripcion": payload.descripcion
+        }
+        res = supabase.table("numeros_excluidos").insert(data_insert).execute()
+        return res.data
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al registrar número excluido: {str(e)}")
+        print(f"Error en POST numeros-excluidos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-# 4. Endpoint para ELIMINAR un número (React hará un DELETE al tocar el tacho de basura)
-@app.delete("/api/numeros-excluidos/{registro_id}")
-async def eliminar_numero_excluido(registro_id: int):
+@app.delete("/api/numeros-excluidos/{id_numero}")
+async def delete_numero_excluido(id_numero: int):
     try:
-        supabase.table("numeros_excluidos").delete().eq("id", registro_id).execute()
-        return {"status": "success", "message": "Número removido de la lista de exclusión."}
+        res = supabase.table("numeros_excluidos").delete().eq("id", id_numero).execute()
+        return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al eliminar número excluido: {str(e)}")
+        print(f"Error en DELETE numeros-excluidos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     
 def programar_evento_futuro(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
     """
