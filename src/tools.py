@@ -159,9 +159,16 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
 def _programar_upstash_desde_tools(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
     """
     Función auxiliar para agendar el recordatorio en QStash desde las tools del bot.
+    Leyendo credenciales desde las variables de entorno de forma segura.
     """
-    QSTASH_TOKEN = "TU_TOKEN_GRATUITO_DE_UPSTASH" # Acordate de reemplazar esto
-    URL_RAILWAY = "https://tu-url-de-railway.up.railway.app" # Y esto
+    # 🌟 Traemos los datos de manera interna sin exponer los tokens
+    QSTASH_TOKEN = os.getenv("QSTASH_TOKEN")
+    URL_RAILWAY = os.getenv("URL_RAILWAY")
+    
+    # Control de seguridad por si falta alguna variable
+    if not QSTASH_TOKEN or not URL_RAILWAY:
+        print("❌ [QStash Tool] Error crítico: QSTASH_TOKEN o URL_RAILWAY no configurados en el entorno.")
+        return
     
     url_qstash = f"https://qstash.upstash.io/v2/publish/{URL_RAILWAY}/api/webhooks/disparar-mensaje-programado"
     
@@ -206,6 +213,22 @@ def obtener_configuracion_comercio(comercio_id: int) -> dict:
         "politica_garantia": "Garantía estándar de la tienda",
         "telefono_dueno": None
     }
+    
+def verificar_numero_excluido(telefono: str, comercio_id: str) -> bool:
+    """
+    Consulta en Supabase si el número está en la lista negra de ese comercio específico.
+    """
+    try:
+        resultado = supabase.table("numeros_excluidos") \
+            .select("id") \
+            .eq("comercio_id", comercio_id) \
+            .eq("telefono", telefono) \
+            .execute()
+        
+        return len(resultado.data) > 0
+    except Exception as e:
+        print(f"❌ Error al verificar lista de exclusión: {e}")
+        return False
 
 def solicitar_asistencia_humana(motivo: str, telefono_cliente: str, comercio_id: int) -> str:
     """Envía un WhatsApp de alerta al dueño del comercio notificándole que se requiere su atención."""

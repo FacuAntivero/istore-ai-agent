@@ -7,10 +7,13 @@ import requests
 import json
 import asyncio
 import mercadopago
+import threading
 from datetime import datetime, timedelta
+from typing import Optional  # 🌟 ESTO ES LO QUE FALTABA PARA TU CLASE DE PYDANTIC
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from tools import verificar_numero_excluido  # 💡 Mejor ponerla acá abajo del sys.path
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -22,8 +25,6 @@ from agent import iniciar_agente
 
 # 🧠 Imports para los recordatorios automáticos
 from contextlib import asynccontextmanager
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
 load_dotenv()
 
 # --- PLANIFICADOR DE NOTIFICACIONES INTEGRADO (POST-VENTA) ---
@@ -52,15 +53,68 @@ class NgrokHeaderMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers["ngrok-skip-browser-warning"] = "true"
         return response
-
+    
+class NumeroExcluidoInput(BaseModel):
+    comercio_id: str # Ajustalo a int si tus IDs de comercio son numéricos
+    telefono: str
+    descripcion: Optional[str] = None
+    
 app.add_middleware(NgrokHeaderMiddleware)
 
+_lock_whatsapp = threading.Lock()
+_ultimo_envio_timestamp = 0.0
+
+@app.get("/api/numeros-excluidos/{comercio_id}")
+async def obtener_numeros_excluidos(comercio_id: str):
+    try:
+        res = supabase.table("numeros_excluidos") \
+            .select("id, telefono, descripcion, created_at") \
+            .eq("comercio_id", comercio_id) \
+            .order("created_at", ascending=False) \
+            .execute()
+        return res.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener números excluidos: {str(e)}")
+
+# 3. Endpoint para AGREGAR un número (React hará un POST al darle a "Guardar")
+@app.post("/api/numeros-excluidos")
+async def crear_numero_excluido(datos: NumeroExcluidoInput):
+    try:
+        # Limpiamos el teléfono por las dudas (sacamos espacios, guiones o el +)
+        telefono_limpio = "".join(filter(str.isdigit, datos.telefono))
+        
+        res = supabase.table("numeros_excluidos").insert({
+            "comercio_id": datos.comercio_id,
+            "telefono": telefono_limpio,
+            "descripcion": datos.descripcion
+        }).execute()
+        
+        return {"status": "success", "data": res.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al registrar número excluido: {str(e)}")
+
+# 4. Endpoint para ELIMINAR un número (React hará un DELETE al tocar el tacho de basura)
+@app.delete("/api/numeros-excluidos/{registro_id}")
+async def eliminar_numero_excluido(registro_id: int):
+    try:
+        supabase.table("numeros_excluidos").delete().eq("id", registro_id).execute()
+        return {"status": "success", "message": "Número removido de la lista de exclusión."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al eliminar número excluido: {str(e)}")
+    
 def programar_evento_futuro(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
     """
     Se comunica con Upstash QStash para agendar un webhook en el futuro.
+    Leyendo las credenciales de forma segura desde las variables de entorno.
     """
-    QSTASH_TOKEN = "eyJVc2VySUQiOiI0YTRjYzljZi1jMzA1LTRlNzMtYjhkYS01ZWNiNzc1MjNlMTciLCJQYXNzd29yZCI6IjgyOGQ5MTE0ZDdkNjQ5OGZhMWIxYjI3OTQ5OTcwZjczIn0=" # Reemplazar con tu token real
-    URL_RAILWAY = "https://istore-ai-agent-production.up.railway.app" # Reemplazar con tu URL de Railway
+    # 🌟 Leemos las variables del archivo .env de forma segura
+    QSTASH_TOKEN = os.getenv("QSTASH_TOKEN")
+    URL_RAILWAY = os.getenv("URL_RAILWAY")
+    
+    # Validación de seguridad por si te olvidás de configurarlas
+    if not QSTASH_TOKEN or not URL_RAILWAY:
+        print("❌ [QStash] Error crítico: QSTASH_TOKEN o URL_RAILWAY no están configurados en el entorno.")
+        return
     
     url_qstash = f"https://qstash.upstash.io/v2/publish/{URL_RAILWAY}/api/webhooks/disparar-mensaje-programado"
     
@@ -386,6 +440,13 @@ def simular_escribiendo(numero_destino, instance_name, encendido=True):
         pass
 
 def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
+    global _ultimo_envio_timestamp
+    
+    # 1. CALCULAR DELAY DE ESCRITURA (Para el "Escribiendo...")
+    # Calculamos unos 50ms por carácter + un extra aleatorio para simular factor humano.
+    # Limitamos el delay entre 1.5 y 3 segundos para que no sea una eternidad.
+    delay_milisegundos = min(max(len(texto) * 50 + random.randint(500, 1500), 1500), 3000)
+    
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
     headers = {"apikey": API_KEY, "Content-Type": "application/json"}
     
@@ -395,7 +456,7 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
         "checkNumber": False,       
         "verifyNumber": False,      
         "options": {
-            "delay": 0,
+            "delay": delay_milisegundos, # 🌟 Muestra "Escribiendo..." por este tiempo en WhatsApp
             "checkNumber": False    
         }
     }
@@ -405,14 +466,28 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
             "key": {"id": id_mensaje, "remoteJid": remote_jid, "fromMe": False}
         }
         
-    try:
-        respuesta = requests.post(url, headers=headers, json=payload)
-        if respuesta.status_code in [200, 201]:
-            print(f"✅ Mensaje despachado con éxito a {numero_destino}")
-        else:
-            print(f"❌ Error al enviar a WhatsApp: {respuesta.text}")
-    except Exception as e:
-        print(f"❌ Error crítico de red: {e}")
+    # 2. PROTEGER EL ENVÍO CON EL FILTRO ANTI-RÁFAGA GLOBAL
+    with _lock_whatsapp:
+        ahora = time.time()
+        tiempo_transcurrido = ahora - _ultimo_envio_timestamp
+        
+        # Si pasó menos de 1.5 segundos desde el último envío (a cualquier chat), esperamos la diferencia
+        if tiempo_transcurrido < 1.5:
+            tiempo_espera = 1.5 - tiempo_transcurrido
+            print(f"⏳ [Anti-Ban] Mensaje en cola. Esperando {tiempo_espera:.2f}s para respetar el límite global.")
+            time.sleep(tiempo_espera)
+        
+        # Actualizamos el timestamp del último mensaje despachado
+        _ultimo_envio_timestamp = time.time()
+
+        try:
+            respuesta = requests.post(url, headers=headers, json=payload)
+            if respuesta.status_code in [200, 201]:
+                print(f"✅ Mensaje despachado con éxito a {numero_destino}")
+            else:
+                print(f"❌ Error al enviar a WhatsApp: {respuesta.text}")
+        except Exception as e:
+            print(f"❌ Error crítico de red: {e}")
 
 # --- FUNCIÓN DE ALERTA AL DUEÑO ---
 def alertar_consumo_dueno(telefono_dueno, porcentaje, mensajes_restantes, instance_name):
@@ -431,6 +506,14 @@ def alertar_consumo_dueno(telefono_dueno, porcentaje, mensajes_restantes, instan
     print(f"📢 [ALERTA] Aviso de {porcentaje}% enviado al dueño ({tel_dueno_jid})")
 
 async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original):
+    # 🌟 1. EL FILTRO MÁGICO: Si el número está excluido, frenamos acá de inmediato.
+    # Evita llamadas a Gemini y que se le descuenten créditos de forma injusta al comercio.
+    if verificar_numero_excluido(id_remitente_limpio, comercio_id):
+        print(f"🤫 [Filtro Blacklist] Mensaje de {id_remitente_limpio} ignorado para el comercio {comercio_id}.")
+        buffer_mensajes.pop(id_remitente_limpio, None)
+        return
+
+    # 2. Control de consistencia del buffer
     if id_remitente_limpio not in buffer_mensajes or not buffer_mensajes[id_remitente_limpio]:
         return
 
@@ -468,6 +551,7 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         print(f"❌ [SaaS] Error verificando suscripción: {e}")
     # ---------------------------------------------------------------
 
+    # Extraemos los mensajes limpiando el buffer de memoria reactiva
     mensajes = buffer_mensajes.pop(id_remitente_limpio)
     
     # Preparamos el contenido estructurado que recibirá Gemini
@@ -478,7 +562,6 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         textos_del_bloque.append(m["texto"])
         # Si el elemento trae contenido de audio adjunto, lo estructuramos para la SDK de Google
         if "audio_bytes" in m and m["audio_bytes"]:
-            # ✅ ESTE ES EL CAMBIO CLAVE: Usamos types.Part.from_bytes
             parte_audio = types.Part.from_bytes(
                 data=m["audio_bytes"],
                 mime_type="audio/ogg"
@@ -514,8 +597,10 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             await asyncio.sleep(delay_total)
             simular_escribiendo(numero_destino, instance_name, encendido=False)
 
+        # Despachamos la respuesta a WhatsApp usando tu función con escudo de tiempo integrado
         enviar_mensaje_whatsapp(numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
 
+        # --- SISTEMA DE TRASPASO O ALERTA AL HUMANO ---
         try:
             res_conf = supabase.table("configuracion_comercios").select("telefono_dueno", "mensaje_cotizacion_tecnico").eq("comercio_id", comercio_id).execute()
             if res_conf.data:
