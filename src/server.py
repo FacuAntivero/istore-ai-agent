@@ -55,7 +55,7 @@ class NgrokHeaderMiddleware(BaseHTTPMiddleware):
         return response
     
 class NumeroExcluidoInput(BaseModel):
-    comercio_id: str # Ajustalo a int si tus IDs de comercio son numéricos
+    comercio_id: int # Ajustalo a int si tus IDs de comercio son numéricos
     telefono: str
     descripcion: Optional[str] = None
     
