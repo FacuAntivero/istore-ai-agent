@@ -254,7 +254,26 @@ async def obtener_plantillas(comercio_id: int):
     except Exception as e:
         print(f"❌ ERROR EN GET PLANTILLAS: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
+    
+@app.put("/api/plantillas/{plantilla_id}")
+async def actualizar_plantilla(plantilla_id: int, datos: PlantillaPostVentaInput):
+    """Actualiza una plantilla existente en la base de datos."""
+    try:
+        # Preparamos los datos que vamos a actualizar
+        payload = {
+            "nombre": datos.nombre,
+            "dias_espera": datos.dias_espera,
+            "texto": datos.texto
+        }
+        
+        # Ejecutamos el update en Supabase filtrando por el ID de la plantilla
+        res = supabase.table("plantillas_postventa").update(payload).eq("id", plantilla_id).execute()
+        
+        return {"status": "success", "data": res.data}
+    except Exception as e:
+        print(f"❌ ERROR EN PUT PLANTILLAS: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
 @app.post("/api/plantillas")
 async def crear_plantilla(datos: PlantillaPostVentaInput):
     """Guarda una nueva plantilla en la base de datos."""
