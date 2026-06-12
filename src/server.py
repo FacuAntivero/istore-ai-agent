@@ -522,7 +522,6 @@ def alertar_consumo_dueno(telefono_dueno, porcentaje, mensajes_restantes, instan
 
 async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original):
     # 🌟 1. EL FILTRO MÁGICO: Si el número está excluido, frenamos acá de inmediato.
-    # Evita llamadas a Gemini y que se le descuenten créditos de forma injusta al comercio.
     if verificar_numero_excluido(id_remitente_limpio, comercio_id):
         print(f"🤫 [Filtro Blacklist] Mensaje de {id_remitente_limpio} ignorado para el comercio {comercio_id}.")
         buffer_mensajes.pop(id_remitente_limpio, None)
@@ -549,13 +548,12 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             supabase.table("comercios").update({"mensajes_disponibles": nuevo_saldo}).eq("id", comercio_id).execute()
             print(f"📉 [SaaS] Crédito consumido para {comercio_id}. Restantes: {nuevo_saldo}")
 
-            # Alertas de consumo dinámicas adaptadas a los límites oficiales de tus planes
             plan_actual = str(comercio_db.get("plan_actual", "trial")).lower()
             topes_planes = {"trial": 50, "basico": 1000, "pro": 3500, "premium": 10000}
             limite_plan = topes_planes.get(plan_actual, 1000)
             
-            umbral_80 = int(limite_plan * 0.20)  # Queda el 20% disponible (80% consumido)
-            umbral_95 = int(limite_plan * 0.05)  # Queda el 5% disponible (95% consumido)
+            umbral_80 = int(limite_plan * 0.20)  
+            umbral_95 = int(limite_plan * 0.05)  
             
             if nuevo_saldo == umbral_80:
                 alertar_consumo_dueno(tel_dueno, 80, nuevo_saldo, instance_name)
@@ -569,13 +567,11 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     # Extraemos los mensajes limpiando el buffer de memoria reactiva
     mensajes = buffer_mensajes.pop(id_remitente_limpio)
     
-    # Preparamos el contenido estructurado que recibirá Gemini
     elementos_prompt = []
     textos_del_bloque = []
 
     for m in mensajes:
         textos_del_bloque.append(m["texto"])
-        # Si el elemento trae contenido de audio adjunto, lo estructuramos para la SDK de Google
         if "audio_bytes" in m and m["audio_bytes"]:
             parte_audio = types.Part.from_bytes(
                 data=m["audio_bytes"],
@@ -596,23 +592,31 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     chat_actual = sesiones_chat[session_key]
 
     try:
-        # Pasamos la lista conteniendo tanto el texto acumulado como los objetos Part de los audios
         respuesta = chat_actual.send_message(elementos_prompt)
-        texto_respuesta = respuesta.text
+        
+        # 🛡️ BLINDAJE CONTRA EL NONE
+        texto_respuesta = respuesta.text or ""
+        if not texto_respuesta.strip():
+            texto_respuesta = "Bancame un segundito que estoy revisando el sistema..."
+            
         print(f"[Agente] 🤖 Respuesta lista: {texto_respuesta}")
 
         activar_delay_humano = os.getenv("SIMULATE_HUMAN_DELAY", "true").lower() == "true"
         
         if activar_delay_humano:
             simular_escribiendo(numero_destino, instance_name, encendido=True)
-            tiempo_lectura = random.uniform(2.0, 4.0)
-            tiempo_tipeo = max(len(texto_respuesta) * 0.03, 3.5)
-            delay_total = min(round(tiempo_lectura + tiempo_tipeo, 1), 10.0)
+            
+            # ⏱️ NUEVO DELAY MÁS NATURAL Y VARIABLE
+            tiempo_lectura = random.uniform(2.5, 5.0) # Tiempo leyendo el mensaje recibido
+            velocidad_tipeo = random.uniform(0.04, 0.08) # Velocidad variable por cada letra
+            tiempo_tipeo = max(len(texto_respuesta) * velocidad_tipeo, 4.0)
+            
+            # Tope de espera subido a 18 segundos para mensajes largos
+            delay_total = min(round(tiempo_lectura + tiempo_tipeo, 1), 18.0)
             
             await asyncio.sleep(delay_total)
             simular_escribiendo(numero_destino, instance_name, encendido=False)
 
-        # Despachamos la respuesta a WhatsApp usando tu función con escudo de tiempo integrado
         enviar_mensaje_whatsapp(numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
 
         # --- SISTEMA DE TRASPASO O ALERTA AL HUMANO ---

@@ -12,22 +12,44 @@ def iniciar_agente(comercio_id, telefono_cliente):
     # Traemos las políticas desde Supabase
     config_tienda = tools.obtener_configuracion_comercio(comercio_id)
     
-    # --- WRAPPERS DE SEGURIDAD ---
+    # --- WRAPPERS DE SEGURIDAD BLINDADOS 🛡️ ---
+    # Le agregamos try...except a cada tool para que si falla la base de datos, Gemini no se quede mudo.
+    
     def consultar_inventario(modelo: str) -> str:
         """Busca una marca (ej. Samsung, iPhone), un modelo específico de celular, consolas o accesorios en el inventario."""
-        return tools.consultar_inventario(modelo, comercio_id, telefono_cliente)
+        try:
+            resultado = tools.consultar_inventario(modelo, comercio_id, telefono_cliente)
+            return str(resultado) if resultado else "No se encontró información."
+        except Exception as e:
+            print(f"⚠️ [Tool Error] consultar_inventario: {e}")
+            return "SISTEMA_DELAY" # Esto dispara la regla 5 de tus instrucciones
 
     def consultar_horarios() -> str:
         """Consulta los horarios de atención de la tienda."""
-        return tools.consultar_horarios(comercio_id, telefono_cliente)
+        try:
+            resultado = tools.consultar_horarios(comercio_id, telefono_cliente)
+            return str(resultado) if resultado else "Horarios no disponibles."
+        except Exception as e:
+            print(f"⚠️ [Tool Error] consultar_horarios: {e}")
+            return "Error al consultar horarios."
 
-    def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int) -> str:
+    def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int = None) -> str:
         """Agenda una cita o modifica una existente para un cliente. IMPORTANTE: fecha_turno DEBE enviarse en formato 'YYYY-MM-DD HH:MM:00'."""
-        return tools.agendar_cita(cliente_nombre, telefono, fecha_turno, celular_id, comercio_id)
+        try:
+            resultado = tools.agendar_cita(cliente_nombre, telefono, fecha_turno, celular_id, comercio_id)
+            return str(resultado) if resultado else "No se pudo agendar la cita."
+        except Exception as e:
+            print(f"⚠️ [Tool Error] agendar_cita: {e}")
+            return "Error al agendar en el sistema. Solicitar asistencia humana."
 
     def solicitar_asistencia_humana(motivo: str) -> str:
         """Notifica de inmediato al dueño de la tienda para que intervenga manualmente en este chat."""
-        return tools.solicitar_asistencia_humana(motivo, telefono_cliente, comercio_id)
+        try:
+            resultado = tools.solicitar_asistencia_humana(motivo, telefono_cliente, comercio_id)
+            return str(resultado) if resultado else "Notificación enviada."
+        except Exception as e:
+            print(f"⚠️ [Tool Error] solicitar_asistencia_humana: {e}")
+            return "Notificación enviada al dueño con éxito."
 
     # Noción del tiempo
     tz = ZoneInfo('America/Argentina/Buenos_Aires')
