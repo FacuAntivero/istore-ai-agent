@@ -797,7 +797,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 
                 if ahora - ultimo_ts > 300:  # Pasaron más de 300 segundos (5 min)
                     ultimo_aviso_audio[id_remitente_limpio] = ahora
-                    msg_escribime = "¡Hola! Por el momento mi plan no me permite escuchar notas de voz. 🎙️❌\n\nPor favor, *escribime tu consulta por texto* para que pueda ayudarte de inmediato. 😊"
+                    msg_escribime = "hola, por el momento no puedo escuchar audios, por favor escribime tu consulta por texto así te ayudo de inmediato"
                     enviar_mensaje_whatsapp(numero_destino, msg_escribime, instance_name, id_mensaje, key.get("remoteJid"))
                     return {"status": "audio_denegado_plan_basico"}
                 
@@ -807,13 +807,13 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             # Lógica normal para el resto de los planes habilitados (Trial, Pro, Premium)
             permite_audio = comercio.get("permitir_audios", False)
             if not permite_audio:
-                enviar_mensaje_whatsapp(numero_destino, "Perdoná, por el momento solo puedo leer textos. Por favor, escribime tu consulta 😊", instance_name, id_mensaje, key.get("remoteJid"))
+                enviar_mensaje_whatsapp(numero_destino, "perdoná, por el momento solo puedo leer textos, por favor escribime tu consulta", instance_name, id_mensaje, key.get("remoteJid"))
                 return {"status": "audio_rechazado"}
             
             # 🌟 [PLAN PRO/PREMIUM VALIDADOS] -> Descarga asíncrona/directa del audio
             audio_bytes = descargar_audio_evolution(instance_name, mensaje_data)
             if not audio_bytes:
-                enviar_mensaje_whatsapp(numero_destino, "Pucha, tuve un problema al descargar tu nota de voz. 😥 ¿Me la podés repetir o escribir por texto porfa?", instance_name, id_mensaje, key.get("remoteJid"))
+                enviar_mensaje_whatsapp(numero_destino, "tuve un problema al descargar tu nota de voz, me la podés escribir por texto porfa", instance_name, id_mensaje, key.get("remoteJid"))
                 return {"status": "error_descarga_audio"}
 
             if id_remitente_limpio not in buffer_mensajes:
@@ -1106,7 +1106,7 @@ async def registrar_venta_directa(request: Request):
         print(f"❌ Error en registro de venta directa: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.put("/api/turnos/{turno_id}/completar")
+@app.put("/api/api/turnos/{turno_id}/completar")
 async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: int = None):
     try:
         turno_res = supabase.table("turnos_clientes").select("id, comercio_id, cliente_nombre, telefono, celulares_ids").eq("id", turno_id).execute()
@@ -1123,20 +1123,21 @@ async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: i
         
         if celulares_ids:
             for nid in celulares_ids:
+                # Modificamos para liquidar el estado visual y forzar stock a 0 por seguridad
                 supabase.table("inventario_celulares").update({
-                    "estado_venta": "vendido"
+                    "estado_venta": "vendido",
+                    "stock": 0 
                 }).eq("id", int(nid)).execute()
         
         estrategia_final = plantilla_id if plantilla_id else (estrategia or "satisfaccion")
 
-        # Capturamos si se agendó o no
         postventa_agendada = False
         if comercio_id:
             postventa_agendada = await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia_final)
         
         return {
             "status": "success", 
-            "postventa_agendada": postventa_agendada # Se lo mandamos a React
+            "postventa_agendada": postventa_agendada
         }
         
     except Exception as e:
