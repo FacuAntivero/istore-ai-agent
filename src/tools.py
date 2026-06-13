@@ -198,25 +198,62 @@ def _programar_upstash_desde_tools(tipo_evento: str, registro_id: int, fecha_dis
         print(f"❌ [QStash Tool] Error al programar: {e}")
             
 def obtener_configuracion_comercio(comercio_id: int) -> dict:
-    """Trae las políticas personalizadas del comercio desde la base de datos."""
+    """Trae las políticas personalizadas del comercio desde la base de datos o las crea si no existen (On-Demand)."""
     try:
+        # 1. Buscamos si ya existe la configuración
         response = supabase.table("configuracion_comercios") \
             .select("*") \
             .eq("comercio_id", int(comercio_id)) \
             .execute()
+        
         if response.data:
             return response.data[0]
+            
+        # 2. Si NO existe (comercio nuevo sin configurar), la creamos on-the-fly
+        print(f"⚠️ [Sistema] Comercio ID {comercio_id} no tiene configuración. Creando fila por defecto...")
+        
+        tel_dueno = None
+        # Intentamos recuperar el teléfono del dueño de la tabla principal
+        try:
+            res_comercio = supabase.table("comercios").select("telefono_dueno").eq("id", int(comercio_id)).execute()
+            if res_comercio.data:
+                tel_dueno = res_comercio.data[0].get("telefono_dueno")
+        except Exception as e_tel:
+            print(f"[Sistema] ⚠️ No se pudo obtener el teléfono del dueño para la config: {e_tel}")
+
+        # Armamos el diccionario de configuración seguro por defecto
+        config_default = {
+            "comercio_id": int(comercio_id),
+            "metodos_pago": "Efectivo",
+            "recargo_usdt": "0%",
+            "tipo_cambio_efectivo": "Dólar blue vendedor del día",
+            "permuta_minima": "No especificado",
+            "politica_garantia": "Garantía de prueba",
+            "telefono_dueno": tel_dueno, 
+            "requiere_cita": False, # Valor clave: asume local a la calle
+            "direccion_fisica": "NUESTRO_LOCAL",
+            "acepta_canje": False,
+            "preguntas_canje": "Qué modelo es? Cuantos gb tiene?",
+            "ofrece_servicio_tecnico": False,
+            "reparaciones_ofrecidas": "",
+            "mensaje_cotizacion_tecnico": "Aguardame un instante que te preparo la cotización sin cargo",
+            "minutos_anticipacion_recordatorio": 15
+        }
+        
+        # 3. La insertamos para que quede guardada y lista para el frontend
+        supabase.table("configuracion_comercios").insert(config_default).execute()
+        print(f"✅ [Sistema] Configuración inicializada y guardada para Comercio ID: {comercio_id}")
+        
+        return config_default
+
     except Exception as e:
-        print(f"[Sistema] ❌ Error leyendo configuración del comercio: {e}")
-    
-    return {
-        "metodos_pago": "Efectivo",
-        "recargo_usdt": "A consultar",
-        "tipo_cambio_efectivo": "A coordinar",
-        "permuta_minima": "No especificado",
-        "politica_garantia": "Garantía estándar de la tienda",
-        "telefono_dueno": None
-    }
+        print(f"[Sistema] ❌ Error leyendo/creando configuración del comercio: {e}")
+        # Retorno de emergencia hiperbásico por si falla la inserción
+        return {
+            "metodos_pago": "Efectivo",
+            "requiere_cita": False, 
+            "telefono_dueno": None
+        }
     
 def verificar_numero_excluido(telefono: str, comercio_id: str) -> bool:
     """Consulta en Supabase si el número está en la lista negra de ese comercio específico."""
