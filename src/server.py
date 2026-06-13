@@ -8,12 +8,12 @@ import json
 import asyncio
 import mercadopago
 import threading
-from datetime import datetime, timedelta
-from typing import Optional  # 🌟 ESTO ES LO QUE FALTABA PARA TU CLASE DE PYDANTIC
+from datetime import datetime, timedelta, timezone  # 🌟 AGREGUÉ timezone PARA QSTASH
+from typing import Optional  
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from tools import verificar_numero_excluido  # 💡 Mejor ponerla acá abajo del sys.path
+from tools import verificar_numero_excluido  
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -28,10 +28,41 @@ from contextlib import asynccontextmanager
 load_dotenv()
 
 # --- PLANIFICADOR DE NOTIFICACIONES INTEGRADO (POST-VENTA) ---
-# Importamos SOLO lo que necesitamos del cron viejo para que no haya conflictos
 from cron_notificaciones import procesar_postventa
 
 app = FastAPI(title="iStore AI Webhook")
+
+# --- 🚦 SISTEMA DE COLA GLOBAL ANTI-BANEO ---
+cola_mensajes = asyncio.Queue()
+
+async def worker_procesador_cola():
+    """Trabajador en segundo plano que procesa los mensajes UNO POR UNO."""
+    print("👷 Worker de mensajes iniciado y esperando trabajo...")
+    while True:
+        # Esperamos a que entre un nuevo bloque a la cola
+        tarea = await cola_mensajes.get()
+        id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original = tarea
+        
+        try:
+            # Al usar await acá, el worker SE TRABA hasta que Gemini responde,
+            # simula el tipeo y envía el mensaje por WhatsApp.
+            # Esto garantiza que JAMÁS salgan mensajes en paralelo a distintos clientes.
+            # (Python encontrará procesar_bloque_mensajes porque se define más abajo en el archivo)
+            await procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original)
+            
+            # Pequeña pausa extra humana entre clientes (1 a 3 segundos) antes de leer al siguiente
+            await asyncio.sleep(random.uniform(1.0, 3.0))
+        except Exception as e:
+            print(f"❌ [Worker Error] Falló el procesamiento en cola de {id_remitente_limpio}: {e}")
+        finally:
+            # Le avisamos a la cola que la tarea terminó
+            cola_mensajes.task_done()
+
+# Hook de FastAPI para encender el Worker cuando arranca el servidor
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(worker_procesador_cola())
+# ----------------------------------------------
     
 app.add_middleware(
     CORSMiddleware,
@@ -44,6 +75,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 class PayloadWebhookMensaje(BaseModel):
     tipo: str          # "cita" o "postventa"
     registro_id: int   # El ID en la base de datos
@@ -202,7 +234,7 @@ def procesar_envio_inmediato(tipo: str, registro_id: int):
 
     except Exception as e:
         print(f"❌ [Ejecutor] Error crítico: {e}")
-
+        
 class EditarPostVentaInput(BaseModel):
     mensaje_texto: str
     fecha_envio: str
@@ -521,17 +553,15 @@ def alertar_consumo_dueno(telefono_dueno, porcentaje, mensajes_restantes, instan
     print(f"📢 [ALERTA] Aviso de {porcentaje}% enviado al dueño ({tel_dueno_jid})")
 
 async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original):
-    # 🌟 1. EL FILTRO MÁGICO: Si el número está excluido, frenamos acá de inmediato.
     if verificar_numero_excluido(id_remitente_limpio, comercio_id):
-        print(f"🤫 [Filtro Blacklist] Mensaje de {id_remitente_limpio} ignorado para el comercio {comercio_id}.")
+        print(f"🤫 [Filtro Blacklist] Mensaje de {id_remitente_limpio} ignorado.")
         buffer_mensajes.pop(id_remitente_limpio, None)
         return
 
-    # 2. Control de consistencia del buffer
+    # Si la cola procesa un ticket duplicado, el buffer ya estará vacío gracias a esta línea
     if id_remitente_limpio not in buffer_mensajes or not buffer_mensajes[id_remitente_limpio]:
         return
 
-    # --- 🛡️ BARRERA SAAS: VALIDACIÓN DE SUSCRIPCIÓN Y SALDO ---
     try:
         res_comercio = supabase.table("comercios").select("mensajes_disponibles", "plan_actual", "telefono_dueno").eq("id", comercio_id).execute()
         if res_comercio.data:
@@ -540,31 +570,25 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             tel_dueno = comercio_db.get("telefono_dueno")
 
             if saldo <= 0:
-                print(f"🚫 [SaaS] Comercio {comercio_id} no tiene mensajes disponibles. Bot frenado.")
+                print(f"🚫 [SaaS] Comercio {comercio_id} sin crédito.")
                 buffer_mensajes.pop(id_remitente_limpio, None)
                 return
             
             nuevo_saldo = saldo - 1
             supabase.table("comercios").update({"mensajes_disponibles": nuevo_saldo}).eq("id", comercio_id).execute()
-            print(f"📉 [SaaS] Crédito consumido para {comercio_id}. Restantes: {nuevo_saldo}")
 
             plan_actual = str(comercio_db.get("plan_actual", "trial")).lower()
             topes_planes = {"trial": 50, "basico": 1000, "pro": 3500, "premium": 10000}
             limite_plan = topes_planes.get(plan_actual, 1000)
             
-            umbral_80 = int(limite_plan * 0.20)  
-            umbral_95 = int(limite_plan * 0.05)  
-            
-            if nuevo_saldo == umbral_80:
+            if nuevo_saldo == int(limite_plan * 0.20):
                 alertar_consumo_dueno(tel_dueno, 80, nuevo_saldo, instance_name)
-            elif nuevo_saldo == umbral_95:
+            elif nuevo_saldo == int(limite_plan * 0.05):
                 alertar_consumo_dueno(tel_dueno, 95, nuevo_saldo, instance_name)
-
     except Exception as e:
         print(f"❌ [SaaS] Error verificando suscripción: {e}")
-    # ---------------------------------------------------------------
 
-    # Extraemos los mensajes limpiando el buffer de memoria reactiva
+    # Extraemos y limpiamos el buffer
     mensajes = buffer_mensajes.pop(id_remitente_limpio)
     
     elementos_prompt = []
@@ -573,18 +597,14 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     for m in mensajes:
         textos_del_bloque.append(m["texto"])
         if "audio_bytes" in m and m["audio_bytes"]:
-            parte_audio = types.Part.from_bytes(
-                data=m["audio_bytes"],
-                mime_type="audio/ogg"
-            )
+            parte_audio = types.Part.from_bytes(data=m["audio_bytes"], mime_type="audio/ogg")
             elementos_prompt.append(parte_audio)
 
     texto_completo = ". ".join(textos_del_bloque)
     elementos_prompt.append(texto_completo)
     
     ultimo_id_mensaje = mensajes[-1]["id_mensaje"]
-
-    print(f"\n[Procesando Bloque 📦] {id_remitente_limpio}: {texto_completo} (Contiene audios: {len(elementos_prompt) > 1})")
+    print(f"\n[Procesando Bloque 📦] {id_remitente_limpio} (Audios: {len(elementos_prompt) > 1})")
 
     session_key = f"{comercio_id}_{id_remitente_limpio}"
     if session_key not in sesiones_chat:
@@ -594,10 +614,9 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     try:
         respuesta = chat_actual.send_message(elementos_prompt)
         
-        # 🛡️ BLINDAJE CONTRA EL NONE
         texto_respuesta = respuesta.text or ""
         if not texto_respuesta.strip():
-            texto_respuesta = "Bancame un segundito que estoy revisando el sistema..."
+            texto_respuesta = "Aguardame un segundo que reviso el sistema..."
             
         print(f"[Agente] 🤖 Respuesta lista: {texto_respuesta}")
 
@@ -606,14 +625,13 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         if activar_delay_humano:
             simular_escribiendo(numero_destino, instance_name, encendido=True)
             
-            # ⏱️ NUEVO DELAY MÁS NATURAL Y VARIABLE
-            tiempo_lectura = random.uniform(2.5, 5.0) # Tiempo leyendo el mensaje recibido
-            velocidad_tipeo = random.uniform(0.04, 0.08) # Velocidad variable por cada letra
-            tiempo_tipeo = max(len(texto_respuesta) * velocidad_tipeo, 4.0)
+            # ⏱️ DELAY MEJORADO: Cálculo por cantidad de caracteres (200 caracteres por minuto)
+            # Un humano tarda aprox 0.05 a 0.08 segundos por letra.
+            tiempo_lectura = random.uniform(2.0, 4.0) 
+            tiempo_tipeo = max(len(texto_respuesta) * random.uniform(0.04, 0.08), 3.0)
+            delay_total = min(round(tiempo_lectura + tiempo_tipeo, 1), 20.0) # Tope 20s para no congelar la cola
             
-            # Tope de espera subido a 18 segundos para mensajes largos
-            delay_total = min(round(tiempo_lectura + tiempo_tipeo, 1), 18.0)
-            
+            print(f"[Anti-Baneo] Tipeando por {delay_total} segundos...")
             await asyncio.sleep(delay_total)
             simular_escribiendo(numero_destino, instance_name, encendido=False)
 
@@ -625,7 +643,7 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             if res_conf.data:
                 conf = res_conf.data[0]
                 tel_dueno = conf.get("telefono_dueno")
-                msg_tecnico_cfg = conf.get("mensaje_cotizacion_tecnico") or "Aguardame un instante que te preparo la cotización sin cargo 🛠"
+                msg_tecnico_cfg = conf.get("mensaje_cotizacion_tecnico") or "Aguardame un instante"
                 
                 debe_notificar = False
                 motivo_alerta = "Intervención Solicitada"
@@ -645,20 +663,19 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
                     mensaje_alerta = (
                         f"⚠️ *[ALERTA AGENTE - {motivo_alerta}]*\n\n"
                         f"El cliente *{id_remitente_limpio}* requiere atención humana urgente.\n"
-                        f"💬 *Historial del bloque:* {texto_completo}\n\n"
+                        f"💬 *Historial:* {texto_completo}\n\n"
                         f"👉 Entrá a tu chat para responderle."
                     )
-                    print(f"📢 [Notificación] Enviando alerta de soporte al dueño ({tel_dueno_jid})")
                     enviar_mensaje_whatsapp(tel_dueno_jid, mensaje_alerta, instance_name)
         except Exception as e:
-            print(f"❌ [Notificación] Error al intentar alertar al dueño: {e}")
+            print(f"❌ [Notificación] Error al alertar al dueño: {e}")
 
     except errors.APIError as e:
         print(f"[Error API Gemini] {e.message}")
         enviar_mensaje_whatsapp(numero_destino, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid_original)
     except Exception as e:
         print(f"[Error Inesperado] {str(e)}")
-
+        
 # --- DETECCIÓN DE TIPOS DE MENSAJE MULTIMEDIA ---
 def extraer_texto_y_tipo(msg_object):
     if not isinstance(msg_object, dict): return None, "text"
@@ -753,18 +770,15 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
         id_remitente_limpio = numero_destino.split("@")[0]
 
-        # --- 🧠 MANEJO DE CONTEXTO PARA MENSAJES ENVIADOS POR EL SISTEMA ---
+        # --- 🧠 MANEJO DE CONTEXTO ---
         if key.get("fromMe", False):
             texto_saliente, tipo = extraer_texto_y_tipo(msg_content)
             
             if texto_saliente and tipo == "text":
                 session_key = f"{comercio_id}_{id_remitente_limpio}"
-                
-                # Instanciamos el agente si no estaba en memoria
                 if session_key not in sesiones_chat:
                     sesiones_chat[session_key] = iniciar_agente(comercio_id, numero_destino)
                 
-                # Le inyectamos al historial de la IA lo que el sistema/humano acaba de enviar
                 sesiones_chat[session_key].history.append(
                     types.Content(
                         role="model", 
@@ -772,9 +786,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                     )
                 )
                 print(f"🧠 [Contexto Inyectado] Gemini ahora sabe que le dijimos: {texto_saliente[:30]}...")
-            
             return {"status": "contexto_guardado"}
-        # -------------------------------------------------------------------
 
         id_mensaje = key.get("id", "")
 
@@ -793,13 +805,11 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             
         elif tipo_mensaje == "audio":
             plan_actual = str(comercio.get("plan_actual", "trial")).lower()
-            
-            # 🛑 LIMITACIÓN PLAN BÁSICO (Rechazo automático + Anti-Spam de 5 minutos)
             if plan_actual == "basico":
                 ahora = time.time()
                 ultimo_ts = ultimo_aviso_audio.get(id_remitente_limpio, 0)
                 
-                if ahora - ultimo_ts > 300:  # Pasaron más de 300 segundos (5 min)
+                if ahora - ultimo_ts > 300: 
                     ultimo_aviso_audio[id_remitente_limpio] = ahora
                     msg_escribime = "hola, por el momento no puedo escuchar audios, por favor escribime tu consulta por texto así te ayudo de inmediato"
                     enviar_mensaje_whatsapp(numero_destino, msg_escribime, instance_name, id_mensaje, key.get("remoteJid"))
@@ -808,13 +818,11 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 print(f"🔇 [Anti-Spam Audio] Audio de {id_remitente_limpio} ignorado silenciosamente.")
                 return {"status": "audio_ignorado_por_spam"}
             
-            # Lógica normal para el resto de los planes habilitados (Trial, Pro, Premium)
             permite_audio = comercio.get("permitir_audios", False)
             if not permite_audio:
                 enviar_mensaje_whatsapp(numero_destino, "perdoná, por el momento solo puedo leer textos, por favor escribime tu consulta", instance_name, id_mensaje, key.get("remoteJid"))
                 return {"status": "audio_rechazado"}
             
-            # 🌟 [PLAN PRO/PREMIUM VALIDADOS] -> Descarga asíncrona/directa del audio
             audio_bytes = descargar_audio_evolution(instance_name, mensaje_data)
             if not audio_bytes:
                 enviar_mensaje_whatsapp(numero_destino, "tuve un problema al descargar tu nota de voz, me la podés escribir por texto porfa", instance_name, id_mensaje, key.get("remoteJid"))
@@ -823,7 +831,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             if id_remitente_limpio not in buffer_mensajes:
                 buffer_mensajes[id_remitente_limpio] = []
             
-            # Almacenamos los bytes directamente dentro de la lista de pendientes
             buffer_mensajes[id_remitente_limpio].append({
                 "texto": "[El usuario envió una nota de voz/audio]",
                 "audio_bytes": audio_bytes,
@@ -833,9 +840,10 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             if id_remitente_limpio in timers_debounce and not timers_debounce[id_remitente_limpio].done():
                 timers_debounce[id_remitente_limpio].cancel()
 
+            # 🚀 CAMBIO: MANDAMOS A LA COLA EN LUGAR DE PROCESAR DIRECTO
             async def timer_task_audio():
                 await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
-                await procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid)
+                await cola_mensajes.put((id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid))
 
             timers_debounce[id_remitente_limpio] = asyncio.create_task(timer_task_audio())
             return {"status": "audio_en_espera"}
@@ -856,9 +864,10 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         if id_remitente_limpio in timers_debounce and not timers_debounce[id_remitente_limpio].done():
             timers_debounce[id_remitente_limpio].cancel()
 
+        # 🚀 CAMBIO: MANDAMOS A LA COLA EN LUGAR DE PROCESAR DIRECTO
         async def timer_task():
             await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
-            await procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid)
+            await cola_mensajes.put((id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid))
 
         timers_debounce[id_remitente_limpio] = asyncio.create_task(timer_task())
         return {"status": "en_espera"}
