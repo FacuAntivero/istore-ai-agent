@@ -228,7 +228,7 @@ def obtener_configuracion_comercio(comercio_id: int) -> dict:
             "recargo_usdt": "0%",
             "tipo_cambio_efectivo": "Dólar blue vendedor del día",
             "permuta_minima": "No especificado",
-            "politica_garantia": "Garantía de prueba",
+            "politica_garantia": "Sin garantía",
             "telefono_dueno": tel_dueno, 
             "requiere_cita": False, # Valor clave: asume local a la calle
             "direccion_fisica": "NUESTRO_LOCAL",

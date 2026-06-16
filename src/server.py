@@ -129,6 +129,16 @@ async def delete_numero_excluido(id_numero: int):
     except Exception as e:
         print(f"Error en DELETE numeros-excluidos: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/test-recordatorio/{turno_id}")
+async def test_recordatorio(turno_id: int):
+    print(f"🧪 Iniciando prueba de recordatorio para ID: {turno_id}")
+    try:
+        # Forzamos la ejecución de la función de envío directamente
+        procesar_envio_inmediato("cita", turno_id)
+        return {"status": "disparo_ejecutado"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
     
 def programar_evento_futuro(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
     """
@@ -191,49 +201,68 @@ async def webhook_disparar_mensaje_programado(data: PayloadWebhookMensaje, backg
 def procesar_envio_inmediato(tipo: str, registro_id: int):
     try:
         if tipo == "cita":
-            res = supabase.table("turnos_clientes").select("*, comercio:comercio_id(evolution_instance)").eq("id", registro_id).eq("estado", "pendiente").eq("recordatorio_enviado", False).execute()
-            if not res.data: 
-                print(f"⚠️ [Ejecutor] Cita ID {registro_id} ignorada (ya enviada, cancelada o no existe).")
+            # 1. ATÓMICO: Marcamos como 'procesando' solo si estaba 'pendiente'
+            lock = supabase.table("turnos_clientes")\
+                .update({"estado": "procesando"})\
+                .eq("id", registro_id)\
+                .eq("estado", "pendiente")\
+                .eq("recordatorio_enviado", False)\
+                .execute()
+            
+            if not lock.data:
+                print(f"⚠️ [Ejecutor] Cita ID {registro_id} ignorada: ya fue procesada por otro hilo.")
                 return
+            
+            # 2. Obtenemos el registro bloqueado
+            res = supabase.table("turnos_clientes")\
+                .select("*, comercio:comercio_id(evolution_instance)")\
+                .eq("id", registro_id)\
+                .execute()
             
             turno = res.data[0]
             instance_name = turno.get("comercio", {}).get("evolution_instance")
-            if not instance_name: return
             
+            # 3. Procesamiento
             fecha_obj = datetime.fromisoformat(turno["fecha_turno"].replace("Z", ""))
             hora_formateada = fecha_obj.strftime("%H:%M")
-            
-            mensaje = (
-                f"¡Hola {turno.get('cliente_nombre', 'Cliente')}! 👋\n\n"
-                f"Te escribimos para recordarte tu cita programada a las *{hora_formateada} hs*.\n\n"
-                f"¡Te esperamos! Ante cualquier inconveniente por favor avisanos."
-            )
+            mensaje = f"¡Hola {turno.get('cliente_nombre', 'Cliente')}! 👋\n\nTe recordamos tu cita a las *{hora_formateada} hs*.\n\n¡Te esperamos!"
             
             enviar_mensaje_whatsapp(turno["telefono"], mensaje, instance_name)
-            supabase.table("turnos_clientes").update({"recordatorio_enviado": True}).eq("id", registro_id).execute()
-            print(f"✅ Recordatorio enviado a {turno.get('cliente_nombre')}")
+            
+            # 4. Finalización atómica
+            supabase.table("turnos_clientes")\
+                .update({"recordatorio_enviado": True, "estado": "completado"})\
+                .eq("id", registro_id)\
+                .execute()
+            print(f"✅ Recordatorio enviado: {turno.get('cliente_nombre')}")
 
         elif tipo == "postventa":
-            res = supabase.table("cola_mensajes_postventa").select("*, comercio:comercio_id(evolution_instance)").eq("id", registro_id).eq("estado", "pendiente").execute()
-            if not res.data:
-                print(f"⚠️ [Ejecutor] Postventa ID {registro_id} ignorada (no pendiente o no existe).")
+            # 1. ATÓMICO: Lock para postventa
+            lock = supabase.table("cola_mensajes_postventa")\
+                .update({"estado": "procesando"})\
+                .eq("id", registro_id)\
+                .eq("estado", "pendiente")\
+                .execute()
+            
+            if not lock.data:
+                print(f"⚠️ [Ejecutor] Postventa ID {registro_id} ignorada: ya fue procesada.")
                 return
             
+            res = supabase.table("cola_mensajes_postventa").select("*, comercio:comercio_id(evolution_instance)").eq("id", registro_id).execute()
             msg = res.data[0]
             instance_name = msg.get("comercio", {}).get("evolution_instance")
-            if not instance_name: return
             
-            texto_ws = msg.get("mensaje_texto")
-            if not texto_ws:
-                equipos = msg.get("equipos_detalle", "equipo")
-                texto_ws = f"¡Hola {msg.get('cliente_nombre', '')}! Gracias por tu compra de {equipos}. ¡Estamos a tu disposición!"
+            # 2. Lógica de envío
+            texto_ws = msg.get("mensaje_texto") or f"¡Hola {msg.get('cliente_nombre', '')}! Gracias por tu compra de {msg.get('equipos_detalle', 'equipo')}. ¡Estamos a tu disposición!"
                 
             enviar_mensaje_whatsapp(msg["telefono"], texto_ws, instance_name)
+            
+            # 3. Finalización
             supabase.table("cola_mensajes_postventa").update({"estado": "enviado"}).eq("id", registro_id).execute()
-            print(f"✅ Post-Venta enviada a {msg.get('cliente_nombre')}")
+            print(f"✅ Post-Venta enviada: {msg.get('cliente_nombre')}")
 
     except Exception as e:
-        print(f"❌ [Ejecutor] Error crítico: {e}")
+        print(f"❌ [Ejecutor] Error crítico en ID {registro_id}: {e}")
         
 class EditarPostVentaInput(BaseModel):
     mensaje_texto: str
@@ -347,7 +376,7 @@ timers_debounce = {}
 rate_limiter = {} # Guarda: { "numero_remitente": [timestamp1, timestamp2...] }
 ultimo_aviso_audio = {} # Anti-Spam: Guarda { "id_remitente": timestamp_ultimo_aviso }
 
-TIEMPO_ESPERA_MENSAJE = float(os.getenv("DEBOUNCE_SECONDS", 3.5))
+TIEMPO_ESPERA_MENSAJE = float(os.getenv("DEBOUNCE_SECONDS", 60))
 
 EVOLUTION_API_URL = "https://evolution-api-production-4b88.up.railway.app"
 API_KEY = "74BD7CFB-C38A-4143-833A-FCEA92FBBA21"
@@ -357,15 +386,23 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 CACHE_COMERCIOS = {}
 
 def obtener_comercio(instancia, forzar_actualizacion=False):
+    # Si no forzamos, revisamos el caché
     if not forzar_actualizacion and instancia in CACHE_COMERCIOS:
+        # Opcional: Podrías añadir aquí una validación de tiempo (ej. si el caché tiene más de 5 min)
         return CACHE_COMERCIOS[instancia]
+    
     try:
+        print(f"🔄 [Cache] Actualizando datos de comercio para instancia: {instancia}")
         res = supabase.table("comercios").select("*").ilike("evolution_instance", instancia).execute()
+        
         if res.data:
-            CACHE_COMERCIOS[instancia] = res.data[0]
-            return res.data[0]
+            comercio_actualizado = res.data[0]
+            CACHE_COMERCIOS[instancia] = comercio_actualizado
+            return comercio_actualizado
+            
     except Exception as e:
-        print(f"[Supabase] ❌ Error buscando comercio: {e}")
+        print(f"[Supabase] ❌ Error crítico buscando comercio: {e}")
+    
     return None
 
 MI_NUMERO = os.getenv("MI_NUMERO", "5492494600615@s.whatsapp.net")
@@ -553,44 +590,62 @@ def alertar_consumo_dueno(telefono_dueno, porcentaje, mensajes_restantes, instan
     print(f"📢 [ALERTA] Aviso de {porcentaje}% enviado al dueño ({tel_dueno_jid})")
 
 async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original):
+    # 1. Filtro de seguridad inicial
     if verificar_numero_excluido(id_remitente_limpio, comercio_id):
         print(f"🤫 [Filtro Blacklist] Mensaje de {id_remitente_limpio} ignorado.")
         buffer_mensajes.pop(id_remitente_limpio, None)
         return
 
-    # Si la cola procesa un ticket duplicado, el buffer ya estará vacío gracias a esta línea
     if id_remitente_limpio not in buffer_mensajes or not buffer_mensajes[id_remitente_limpio]:
         return
 
-    try:
-        res_comercio = supabase.table("comercios").select("mensajes_disponibles", "plan_actual", "telefono_dueno").eq("id", comercio_id).execute()
-        if res_comercio.data:
-            comercio_db = res_comercio.data[0]
-            saldo = comercio_db.get("mensajes_disponibles", 0)
-            tel_dueno = comercio_db.get("telefono_dueno")
+    # 2. Limpieza de memoria: Quitamos el timer apenas empieza el proceso
+    timers_debounce.pop(id_remitente_limpio, None)
 
-            if saldo <= 0:
-                print(f"🚫 [SaaS] Comercio {comercio_id} sin crédito.")
+    try:
+        # 3. Obtención de datos FUERZANDO actualización
+        comercio_db = obtener_comercio(instance_name, forzar_actualizacion=True)
+        
+        if comercio_db:
+            estado = str(comercio_db.get("estado_suscripcion", "trial")).lower().strip()
+            plan_actual = str(comercio_db.get("plan_actual", "basico")).lower().strip()
+            tel_dueno = comercio_db.get("telefono_dueno")
+            creditos_demo = comercio_db.get("creditos_demo", 0)
+            saldo_mensajes = comercio_db.get("mensajes_disponibles", 0)
+
+            print(f"DEBUG SAAS -> Comercio: {comercio_id} | Estado: {estado} | Créditos: {creditos_demo}/{saldo_mensajes}")
+
+            es_trial = (estado == "trial")
+            saldo_actual = creditos_demo if es_trial else saldo_mensajes
+
+            if saldo_actual <= 0:
+                print(f"🚫 [SaaS] Comercio {comercio_id} sin créditos. Bloqueando respuesta.")
+                msg_bloqueo = "Lo siento, este asistente ha finalizado su periodo de prueba. Por favor contacta con el administrador del comercio para continuar."
+                enviar_mensaje_whatsapp(numero_destino, msg_bloqueo, instance_name, None, remote_jid_original)
                 buffer_mensajes.pop(id_remitente_limpio, None)
                 return
-            
-            nuevo_saldo = saldo - 1
-            supabase.table("comercios").update({"mensajes_disponibles": nuevo_saldo}).eq("id", comercio_id).execute()
 
-            plan_actual = str(comercio_db.get("plan_actual", "trial")).lower()
-            topes_planes = {"trial": 50, "basico": 1000, "pro": 3500, "premium": 10000}
-            limite_plan = topes_planes.get(plan_actual, 1000)
-            
-            if nuevo_saldo == int(limite_plan * 0.20):
-                alertar_consumo_dueno(tel_dueno, 80, nuevo_saldo, instance_name)
-            elif nuevo_saldo == int(limite_plan * 0.05):
-                alertar_consumo_dueno(tel_dueno, 95, nuevo_saldo, instance_name)
+            # Realizar el descuento
+            if es_trial:
+                nuevo_saldo = creditos_demo - 1
+                supabase.table("comercios").update({"creditos_demo": nuevo_saldo}).eq("id", comercio_id).execute()
+                print(f"✅ [SaaS] Descontado de TRIAL. Quedan: {nuevo_saldo}")
+                if nuevo_saldo in [10, 2]: alertar_consumo_dueno(tel_dueno, 90 if nuevo_saldo == 10 else 95, nuevo_saldo, instance_name)
+            else:
+                nuevo_saldo = saldo_mensajes - 1
+                supabase.table("comercios").update({"mensajes_disponibles": nuevo_saldo}).eq("id", comercio_id).execute()
+                print(f"✅ [SaaS] Descontado de PLAN. Quedan: {nuevo_saldo}")
+                topes = {"basico": 1000, "pro": 3500, "premium": 10000}
+                limite = topes.get(plan_actual, 1000)
+                if nuevo_saldo == int(limite * 0.20) or nuevo_saldo == int(limite * 0.05):
+                    alertar_consumo_dueno(tel_dueno, 80 if nuevo_saldo > (limite * 0.1) else 95, nuevo_saldo, instance_name)
+        else:
+            return
     except Exception as e:
-        print(f"❌ [SaaS] Error verificando suscripción: {e}")
+        print(f"❌ [SaaS] Error crítico en facturación: {e}")
 
-    # Extraemos y limpiamos el buffer
+    # 4. Procesamiento del mensaje (Gemini)
     mensajes = buffer_mensajes.pop(id_remitente_limpio)
-    
     elementos_prompt = []
     textos_del_bloque = []
 
@@ -602,10 +657,8 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
 
     texto_completo = ". ".join(textos_del_bloque)
     elementos_prompt.append(texto_completo)
-    
     ultimo_id_mensaje = mensajes[-1]["id_mensaje"]
-    print(f"\n[Procesando Bloque 📦] {id_remitente_limpio} (Audios: {len(elementos_prompt) > 1})")
-
+    
     session_key = f"{comercio_id}_{id_remitente_limpio}"
     if session_key not in sesiones_chat:
         sesiones_chat[session_key] = iniciar_agente(comercio_id, numero_destino)
@@ -613,68 +666,17 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
 
     try:
         respuesta = chat_actual.send_message(elementos_prompt)
-        
-        texto_respuesta = respuesta.text or ""
-        if not texto_respuesta.strip():
-            texto_respuesta = "Aguardame un segundo que reviso el sistema..."
+        texto_respuesta = respuesta.text or "Aguardame un segundo que reviso el sistema..."
             
-        print(f"[Agente] 🤖 Respuesta lista: {texto_respuesta}")
-
-        activar_delay_humano = os.getenv("SIMULATE_HUMAN_DELAY", "true").lower() == "true"
-        
-        if activar_delay_humano:
+        # Simulación de tipeo humano
+        if os.getenv("SIMULATE_HUMAN_DELAY", "true").lower() == "true":
             simular_escribiendo(numero_destino, instance_name, encendido=True)
-            
-            # ⏱️ DELAY MEJORADO: Cálculo por cantidad de caracteres (200 caracteres por minuto)
-            # Un humano tarda aprox 0.05 a 0.08 segundos por letra.
-            tiempo_lectura = random.uniform(2.0, 4.0) 
-            tiempo_tipeo = max(len(texto_respuesta) * random.uniform(0.04, 0.08), 3.0)
-            delay_total = min(round(tiempo_lectura + tiempo_tipeo, 1), 20.0) # Tope 20s para no congelar la cola
-            
-            print(f"[Anti-Baneo] Tipeando por {delay_total} segundos...")
-            await asyncio.sleep(delay_total)
+            await asyncio.sleep(min(round(len(texto_respuesta) * 0.06 + 3.0, 1), 20.0))
             simular_escribiendo(numero_destino, instance_name, encendido=False)
 
         enviar_mensaje_whatsapp(numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
-
-        # --- SISTEMA DE TRASPASO O ALERTA AL HUMANO ---
-        try:
-            res_conf = supabase.table("configuracion_comercios").select("telefono_dueno", "mensaje_cotizacion_tecnico").eq("comercio_id", comercio_id).execute()
-            if res_conf.data:
-                conf = res_conf.data[0]
-                tel_dueno = conf.get("telefono_dueno")
-                msg_tecnico_cfg = conf.get("mensaje_cotizacion_tecnico") or "Aguardame un instante"
-                
-                debe_notificar = False
-                motivo_alerta = "Intervención Solicitada"
-                
-                if msg_tecnico_cfg in texto_respuesta:
-                    debe_notificar = True
-                    motivo_alerta = "Presupuesto de Servicio Técnico 🛠️"
-                elif "asesor" in texto_respuesta.lower() and ("continuará" in texto_respuesta.lower() or "derivo" in texto_respuesta.lower() or "atendiendo" in texto_respuesta.lower()):
-                    debe_notificar = True
-                    motivo_alerta = "Plan Canje / Solicitud de Humano 👤"
-                
-                if debe_notificar and tel_dueno:
-                    tel_dueno_jid = tel_dueno.strip()
-                    if not tel_dueno_jid.endswith("@s.whatsapp.net"):
-                        tel_dueno_jid = f"{tel_dueno_jid}@s.whatsapp.net"
-                        
-                    mensaje_alerta = (
-                        f"⚠️ *[ALERTA AGENTE - {motivo_alerta}]*\n\n"
-                        f"El cliente *{id_remitente_limpio}* requiere atención humana urgente.\n"
-                        f"💬 *Historial:* {texto_completo}\n\n"
-                        f"👉 Entrá a tu chat para responderle."
-                    )
-                    enviar_mensaje_whatsapp(tel_dueno_jid, mensaje_alerta, instance_name)
-        except Exception as e:
-            print(f"❌ [Notificación] Error al alertar al dueño: {e}")
-
-    except errors.APIError as e:
-        print(f"[Error API Gemini] {e.message}")
-        enviar_mensaje_whatsapp(numero_destino, "Disculpa, estoy procesando mucha información. ¿Me repites en unos segundos?", instance_name, ultimo_id_mensaje, remote_jid_original)
     except Exception as e:
-        print(f"[Error Inesperado] {str(e)}")
+        print(f"[Error Procesamiento] {e}")
         
 # --- DETECCIÓN DE TIPOS DE MENSAJE MULTIMEDIA ---
 def extraer_texto_y_tipo(msg_object):
@@ -811,7 +813,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 
                 if ahora - ultimo_ts > 300: 
                     ultimo_aviso_audio[id_remitente_limpio] = ahora
-                    msg_escribime = "hola, por el momento no puedo escuchar audios, por favor escribime tu consulta por texto así te ayudo de inmediato"
+                    msg_escribime = "Hola, no puedo escuchar audios, por favor escribime tu consulta así te puedo ayudar"
                     enviar_mensaje_whatsapp(numero_destino, msg_escribime, instance_name, id_mensaje, key.get("remoteJid"))
                     return {"status": "audio_denegado_plan_basico"}
                 
@@ -820,12 +822,12 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             
             permite_audio = comercio.get("permitir_audios", False)
             if not permite_audio:
-                enviar_mensaje_whatsapp(numero_destino, "perdoná, por el momento solo puedo leer textos, por favor escribime tu consulta", instance_name, id_mensaje, key.get("remoteJid"))
+                enviar_mensaje_whatsapp(numero_destino, "Disculpa, por el momento solo puedo leer textos, por favor escribime tu consulta", instance_name, id_mensaje, key.get("remoteJid"))
                 return {"status": "audio_rechazado"}
             
             audio_bytes = descargar_audio_evolution(instance_name, mensaje_data)
             if not audio_bytes:
-                enviar_mensaje_whatsapp(numero_destino, "tuve un problema al descargar tu nota de voz, me la podés escribir por texto porfa", instance_name, id_mensaje, key.get("remoteJid"))
+                enviar_mensaje_whatsapp(numero_destino, "Tuve un problema al escuchar tu audío, me la podés escribir por texto por favor", instance_name, id_mensaje, key.get("remoteJid"))
                 return {"status": "error_descarga_audio"}
 
             if id_remitente_limpio not in buffer_mensajes:
@@ -930,6 +932,8 @@ async def crear_preferencia(request: Request):
         print(f"❌ Error creando preferencia de MP: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Memoria a corto plazo para atajar ráfagas de Mercado Pago en el mismo segundo
+pagos_procesados_cache = set()
 
 @app.post("/webhook/mercadopago")
 async def webhook_mercadopago(request: Request):
@@ -937,36 +941,52 @@ async def webhook_mercadopago(request: Request):
         params = dict(request.query_params)
         
         if params.get("type") == "payment":
-            payment_id = params.get("data.id")
+            payment_id = str(params.get("data.id"))
+            
+            # 1. BARRERA EN MEMORIA: Evita ráfagas instantáneas
+            if payment_id in pagos_procesados_cache:
+                print(f"🛡️ [MercadoPago] Webhook duplicado atajado en caché: {payment_id}")
+                return {"status": "ignored", "message": "Pago ya procesado recientemente"}
             
             payment_info = mp.payment().get(payment_id)
-            payment_data = payment_info["response"]
+            payment_data = payment_info.get("response", {})
             
             status = payment_data.get("status")
             external_reference = payment_data.get("external_reference")
 
             if status == "approved" and external_reference:
-                print(f"💰 [MercadoPago] ¡Pago APROBADO! ID Pago: {payment_id}")
-                
                 partes = external_reference.split("|")
                 comercio_id = partes[0]
                 tipo_plan = partes[1] if len(partes) > 1 else "pro"
+
+                # 2. BARRERA DE BASE DE DATOS: Verificamos si este pago ya se aplicó
+                comercio_res = supabase.table("comercios").select("ultimo_pago_id").eq("id", int(comercio_id)).execute()
                 
-                mensajes_por_plan = {
-                    "basico": 1000,
-                    "pro": 3500,
-                    "premium": 10000
-                }
+                if comercio_res.data:
+                    ultimo_pago_guardado = str(comercio_res.data[0].get("ultimo_pago_id"))
+                    if ultimo_pago_guardado == payment_id:
+                        print(f"⚠️ [MercadoPago] Pago {payment_id} ya fue acreditado previamente en la DB.")
+                        return {"status": "success", "message": "Acreditación ya existente"}
+
+                print(f"💰 [MercadoPago] ¡Pago NUEVO APROBADO! ID Pago: {payment_id}")
+                
+                mensajes_por_plan = {"basico": 1000, "pro": 3500, "premium": 10000}
                 mensajes_a_cargar = mensajes_por_plan.get(tipo_plan, 3500)
                 
                 fecha_vencimiento = (datetime.utcnow() + timedelta(days=30)).isoformat()
                 
+                # 3. ACTUALIZACIÓN ATÓMICA CON SELLO DE PAGO
+                # Actualizamos el plan y sellamos el comercio con este payment_id
                 supabase.table("comercios").update({
                     "estado_suscripcion": "activa",
                     "plan_actual": tipo_plan,
                     "mensajes_disponibles": mensajes_a_cargar,
-                    "plan_vence_el": fecha_vencimiento
+                    "plan_vence_el": fecha_vencimiento,
+                    "ultimo_pago_id": payment_id  # 🔒 Este es tu nuevo candado
                 }).eq("id", int(comercio_id)).execute()
+                
+                # Agregamos a la memoria para atajar futuros rebotes rápidos
+                pagos_procesados_cache.add(payment_id)
                 
                 print(f"✅ Comercio {comercio_id} actualizado a {tipo_plan.upper()} con {mensajes_a_cargar} mensajes.")
                 return {"status": "success", "message": "Comercio activado y saldo recargado"}
@@ -1061,19 +1081,26 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
             "mensaje_texto": texto_campana  
         }
         
+        # 5. INSERCIÓN SEGURA: Dejamos que Supabase maneje la unicidad
         res_insert = supabase.table("cola_mensajes_postventa").insert(payload_postventa).execute()
         
-        # 🌟 EL GATILLO DE UPSTASH: Programamos el evento para el futuro exacto
+        # 🌟 EL GATILLO DE UPSTASH: Solo se programa si se insertó un registro nuevo realmente
         if res_insert.data:
             nuevo_id = res_insert.data[0]["id"]
             programar_evento_futuro("postventa", nuevo_id, fecha_disparo_dt)
+            print(f"🎉 ¡Post-Venta Agendado con precisión de minutos! Estrategia usada: {nombre_estrategia}")
             
-        print(f"🎉 ¡Post-Venta Agendado con precisión de minutos! Estrategia usada: {nombre_estrategia}")
         return True  # ✅ Retorna True porque se agendó con éxito
 
     except Exception as e:
-        print(f"❌ Error en agendar_postventa: {str(e)}")
-        return False
+        error_msg = str(e).lower()
+        # 🛡️ BLINDAJE: Si el error es por nuestro CONSTRAINT UNIQUE, lo capturamos
+        if "unique constraint" in error_msg or "duplicate key" in error_msg or "unique_postventa_por_cliente" in error_msg:
+            print(f"⚠️ [Blindaje] La estrategia '{nombre_estrategia}' ya estaba agendada para {telefono}. Evitando duplicidad exitosamente.")
+            return True # Retornamos True para que el frontend/proceso crea que todo salió bien, porque en efecto, el mensaje ya está asegurado.
+        else:
+            print(f"❌ Error crítico en agendar_postventa: {str(e)}")
+            return False
 
 @app.post("/api/ventas/directa")
 async def registrar_venta_directa(request: Request):
@@ -1120,32 +1147,43 @@ async def registrar_venta_directa(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/api/turnos/{turno_id}/completar")
+@app.put("/api/turnos/{turno_id}/completar")
 async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: int = None):
     try:
-        turno_res = supabase.table("turnos_clientes").select("id, comercio_id, cliente_nombre, telefono, celulares_ids").eq("id", turno_id).execute()
-        if not turno_res.data:
-            raise HTTPException(status_code=404, detail="Turno no encontrado")
+        # 1. BLOQUEO ATÓMICO: Solo completamos si el turno estaba PENDIENTE
+        # Esto evita que dos clics simultáneos disparen el proceso dos veces.
+        lock = supabase.table("turnos_clientes")\
+            .update({"estado": "completado"})\
+            .eq("id", turno_id)\
+            .eq("estado", "pendiente")\
+            .execute()
+        
+        if not lock.data:
+            # Si no hay data, es porque el turno ya no estaba pendiente o no existe
+            raise HTTPException(status_code=400, detail="El turno ya fue procesado o no existe.")
 
-        turno = turno_res.data[0]
+        # 2. Obtenemos datos del turno (ahora que sabemos que es nuestro)
+        turno = lock.data[0]
         comercio_id = turno.get("comercio_id")
         cliente_nombre = turno.get("cliente_nombre")
         telefono = turno.get("telefono")
         celulares_ids = turno.get("celulares_ids", [])
 
-        supabase.table("turnos_clientes").update({"estado": "completado"}).eq("id", turno_id).execute()
-        
+        # 3. Actualización de inventario
         if celulares_ids:
             for nid in celulares_ids:
-                # Modificamos para liquidar el estado visual y forzar stock a 0 por seguridad
                 supabase.table("inventario_celulares").update({
                     "estado_venta": "vendido",
                     "stock": 0 
                 }).eq("id", int(nid)).execute()
         
+        # 4. Agendamiento de postventa
         estrategia_final = plantilla_id if plantilla_id else (estrategia or "satisfaccion")
-
         postventa_agendada = False
+        
         if comercio_id:
+            # Como agendar_postventa ya tiene su blindaje de UNIQUE constraint, 
+            # podemos llamarla con confianza.
             postventa_agendada = await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia_final)
         
         return {
@@ -1153,8 +1191,12 @@ async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: i
             "postventa_agendada": postventa_agendada
         }
         
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        print(f"❌ Error al completar turno {turno_id}: {e}")
+        print(f"❌ Error crítico al completar turno {turno_id}: {e}")
+        # En una arquitectura profesional, si algo falla después de completar el turno,
+        # deberías considerar un "rollback" o una alerta de error grave.
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.put("/api/postventa/{id_registro}")
