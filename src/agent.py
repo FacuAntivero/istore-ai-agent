@@ -9,8 +9,11 @@ client = genai.Client(api_key=config.GEMINI_API_KEY)
 
 def iniciar_agente(comercio_id, telefono_cliente): 
     
-    # Traemos las políticas desde Supabase
+    # Traemos las políticas y datos desde Supabase
     config_tienda = tools.obtener_configuracion_comercio(comercio_id)
+    
+    # 🌟 EXTRAEMOS EL NOMBRE DEL COMERCIO PARA EL SALUDO
+    nombre_tienda = config_tienda.get('nombre', 'nuestra tienda')
     
     # --- WRAPPERS DE SEGURIDAD BLINDADOS 🛡️ ---
     def consultar_inventario(modelo: str) -> str:
@@ -146,6 +149,11 @@ def iniciar_agente(comercio_id, telefono_cliente):
     - REDACCIÓN DE LISTAS Y CONECTORES: Al enumerar características o accesorios, usá siempre comas (,). Reservá la letra 'y' ÚNICAMENTE para el último elemento (Ej: 'en buen estado, con funda y vidrio templado'). PROHIBIDO repetir la 'y' varias veces en una misma frase.
     - Sé conciso y seco: Ve directo al grano.
     - REGLA DE IDENTIDAD: Preséntate como parte del equipo de la tienda. Jamás menciones que eres una IA o bot.
+
+    🌟 REGLA ESTRICTA DE SALUDO:
+    Si el cliente saluda por primera vez (o el historial está vacío / requiere presentación), 
+    DEBÉS presentarte diciendo exactamente: "Hola, somos {nombre_tienda}. ¿En qué te podemos ayudar?" 
+    o una variante natural, amable y corporativa que SIEMPRE incluya el nombre de la tienda.
 
     CONTEXTO TEMPORAL ACTUAL ESTRICTO: Hoy es {fecha_actual_str}.
     Para calcular cualquier fecha futura que pida el cliente, aquí tienes el calendario exacto de los próximos días: 
