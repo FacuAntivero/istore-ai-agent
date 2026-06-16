@@ -27,7 +27,18 @@ def consultar_inventario(modelo_corregido: str, comercio_id: int, telefono_clien
         print(f"[Falla Crítica] ❌ Error en inventario: {e}")
         solicitar_asistencia_humana("Falla técnica del servidor al intentar consultar el inventario", telefono_cliente, comercio_id)
         return "SISTEMA_DELAY: Hubo una interrupción temporal de conexión, ya notificamos automáticamente a un asesor humano. Pide disculpas de forma muy amigable sin tecnicismos y dile que un compañero del local continuará el chat en instantes"
+
+def obtener_nombre_comercio(comercio_id: int) -> str:
+    """Obtiene el nombre real del comercio desde la tabla principal (comercios)."""
+    try:
+        response = supabase.table("comercios").select("nombre").eq("id", int(comercio_id)).execute()
+        if response.data and response.data[0].get("nombre"):
+            return response.data[0]["nombre"]
+    except Exception as e:
+        print(f"❌ Error al obtener el nombre del comercio: {e}")
     
+    return "nuestra tienda"
+
 def consultar_horarios(comercio_id: int, telefono_cliente: str) -> str:
     """Consulta los horarios de atención de la tienda."""
     print(f"\n[Sistema] 🕐 Consultando horarios de atención - Comercio: {comercio_id}")

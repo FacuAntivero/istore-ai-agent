@@ -13,7 +13,7 @@ def iniciar_agente(comercio_id, telefono_cliente):
     config_tienda = tools.obtener_configuracion_comercio(comercio_id)
     
     # 🌟 EXTRAEMOS EL NOMBRE DEL COMERCIO PARA EL SALUDO
-    nombre_tienda = config_tienda.get('nombre', 'nuestra tienda')
+    nombre_tienda = tools.obtener_nombre_comercio(comercio_id)   
     
     # --- WRAPPERS DE SEGURIDAD BLINDADOS 🛡️ ---
     def consultar_inventario(modelo: str) -> str:

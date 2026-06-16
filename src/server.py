@@ -527,9 +527,9 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
     global _ultimo_envio_timestamp
     
     # 1. CALCULAR DELAY DE ESCRITURA (Para el "Escribiendo...")
-    # Calculamos unos 50ms por carácter + un extra aleatorio para simular factor humano.
-    # Limitamos el delay entre 1.5 y 3 segundos para que no sea una eternidad.
-    delay_milisegundos = min(max(len(texto) * 50 + random.randint(500, 1500), 1500), 3000)
+    # Ajustado: 30ms por caracter. Base mínima de 1.2s y máxima de 3.5s.
+    # Esto lo hace sentir más humano y menos instantáneo.
+    delay_milisegundos = min(max(len(texto) * 30 + random.randint(800, 1500), 1200), 3500)
     
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
     headers = {"apikey": API_KEY, "Content-Type": "application/json"}
@@ -567,7 +567,7 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
         try:
             respuesta = requests.post(url, headers=headers, json=payload)
             if respuesta.status_code in [200, 201]:
-                print(f"✅ Mensaje despachado con éxito a {numero_destino}")
+                print(f"✅ Mensaje despachado con éxito a {numero_destino} (Delay simulación: {delay_milisegundos}ms)")
             else:
                 print(f"❌ Error al enviar a WhatsApp: {respuesta.text}")
         except Exception as e:
