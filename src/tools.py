@@ -178,6 +178,8 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
     
 def _programar_upstash_desde_tools(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
     """Función auxiliar para agendar el recordatorio en QStash desde las tools del bot."""
+    from zoneinfo import ZoneInfo  # 🌟 Importación para manejo seguro de zonas horarias
+    
     QSTASH_TOKEN = os.getenv("QSTASH_TOKEN")
     URL_RAILWAY = os.getenv("URL_RAILWAY")
     
@@ -185,13 +187,17 @@ def _programar_upstash_desde_tools(tipo_evento: str, registro_id: int, fecha_dis
         print("❌ [QStash Tool] Error crítico: QSTASH_TOKEN o URL_RAILWAY no configurados en el entorno.")
         return
     
-    url_qstash = f"https://qstash.upstash.io/v2/publish/{URL_RAILWAY}/api/webhooks/disparar-mensaje-programado"
+    # 🧼 Limpiamos posibles barras diagonales al final para evitar URLs rotas (evita el //api)
+    url_base_limpia = URL_RAILWAY.strip("/")
+    url_qstash = f"https://qstash.upstash.io/v2/publish/{url_base_limpia}/api/webhooks/disparar-mensaje-programado"
     
-    ahora_utc = datetime.now(timezone.utc)
+    # 📅 MATEMÁTICA HORARIA CORREGIDA (Evita desfases de 3 horas en producción)
+    tz_local = ZoneInfo('America/Argentina/Buenos_Aires')
     if fecha_disparo.tzinfo is None:
-        fecha_disparo = fecha_disparo.replace(tzinfo=timezone.utc)
+        fecha_disparo = fecha_disparo.replace(tzinfo=tz_local)
         
-    diferencia = (fecha_disparo - ahora_utc).total_seconds()
+    ahora_local = datetime.now(tz_local)
+    diferencia = (fecha_disparo - ahora_local).total_seconds()
     delay_segundos = max(int(diferencia), 5)
 
     headers = {
@@ -203,10 +209,18 @@ def _programar_upstash_desde_tools(tipo_evento: str, registro_id: int, fecha_dis
     payload = {"tipo": tipo_evento, "registro_id": registro_id}
     
     try:
-        requests.post(url_qstash, headers=headers, json=payload)
-        print(f"✅ [QStash Tool] Cita ID {registro_id} programada para avisar en {delay_segundos} segundos.")
+        # Realizamos la petición a la API de Upstash
+        res = requests.post(url_qstash, headers=headers, json=payload)
+        
+        # 🚨 VERIFICACIÓN REAL DEL ESTADO HTTP
+        if res.status_code in [200, 201, 202]:
+            print(f"✅ [QStash Tool] ¡Conexión Exitosa! Cita ID {registro_id} programada en Upstash para dentro de {delay_segundos}s.")
+        else:
+            print(f"❌ [QStash Tool] Upstash rechazó la petición (Código {res.status_code}). Respuesta: {res.text}")
+            print(f"🔗 URL intentada: {url_qstash}")
+            
     except Exception as e:
-        print(f"❌ [QStash Tool] Error al programar: {e}")
+        print(f"❌ [QStash Tool] Error crítico de red al intentar conectar con Upstash: {e}")
             
 def obtener_configuracion_comercio(comercio_id: int) -> dict:
     """Trae las políticas personalizadas del comercio desde la base de datos o las crea si no existen (On-Demand)."""
