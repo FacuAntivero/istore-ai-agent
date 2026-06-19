@@ -2,7 +2,7 @@ from google import genai
 from google.genai import types
 import config
 import tools
-from datetime import datetime, timedelta  # 🌟 Agregamos timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 client = genai.Client(api_key=config.GEMINI_API_KEY)
@@ -12,7 +12,7 @@ def iniciar_agente(comercio_id, telefono_cliente):
     # Traemos las políticas y datos desde Supabase
     config_tienda = tools.obtener_configuracion_comercio(comercio_id)
     
-    # 🌟 EXTRAEMOS EL NOMBRE DEL COMERCIO PARA EL SALUDO
+    # 🌟 EXTRAEMOS EL NOMBRE DEL COMERCIO PARA EL SALUDO DESDE LA TABLA PRINCIPAL
     nombre_tienda = tools.obtener_nombre_comercio(comercio_id)   
     
     # --- WRAPPERS DE SEGURIDAD BLINDADOS 🛡️ ---
@@ -92,7 +92,7 @@ def iniciar_agente(comercio_id, telefono_cliente):
     3. AGENDAMIENTO EN DOS PASOS (CONFIRMACIÓN EXPLÍCITA): 
        - Paso 1: Haz la pregunta de confirmación directa basándote en el calendario estricto. Ej: "Perfecto, te queda bien entonces para el Miércoles 17 de Junio a las 17:30 hs? Confirmame"
        - Paso 2: SOLO cuando el cliente confirme explícitamente ("Sí", "Dale"), ejecutas la herramienta 'agendar_cita'.
-       ⚠️ REGLA CRÍTICA DE FECHA: Al ejecutar 'agendar_cita', 'fecha_turno' DEBE enviarse como 'YYYY-MM-DD HH:MM:00'.
+       ⚠️ REGLA DE FECHA: Al ejecutar 'agendar_cita', mapea correctamente el número de opción elegido por el cliente al ID exacto del JSON del inventario. La 'fecha_turno' DEBE enviarse como 'YYYY-MM-DD HH:MM:00'.
        - Paso 3: Una vez que agendes con éxito, despídete del cliente indicándole EXACTAMENTE este mensaje: "{mensaje_cierre_cita}"
         """
     else:
@@ -176,12 +176,20 @@ def iniciar_agente(comercio_id, telefono_cliente):
        - Paso 2: Menciona únicamente las líneas principales en un solo renglón sin dar precios.
        - Paso 3: Pregunta sutilmente cuál de esos modelos le interesa.
 
-    2. BÚSQUEDA DIRECTA Y DETALLADA: Solo cuando el cliente especifique el modelo exacto, detalla sus características basándote en el JSON del inventario.
-       IMPORTANTE FORMATO VISUAL: NO uses asteriscos (*) ni negritas. Escribe el texto limpio.
-       ⚠️ REGLA DE EQUIPOS NUEVOS VS USADOS:
+    2. BÚSQUEDA DIRECTA Y DETALLADA (FORMATO NUMERADO OBLIGATORIO): 
+       Solo cuando el cliente especifique el modelo exacto, detalla todas las variantes del inventario.
+       
+       ⚠️ REGLA DE ESTRUCTURA Y EVITACIÓN DE CONFUSIÓN: 
+       Debes listar los celulares uno debajo del otro usando una lista numerada estricta (1, 2, 3...). Cada renglón debe contener todas sus características juntas.
+       Ejemplo de formato:
+       1. iPhone 15 Pro Max de 256 GB en color Natural Titanium, usado, con un 98% de batería, incluye funda y vidrio templado, a un precio de 900 USD
+       2. iPhone 15 Pro Max de 512 GB en color Black Titanium, nuevo, caja original sellada, a un precio de 1150 USD
+       
+       IMPORTANTE FORMATO VISUAL: NO uses asteriscos (*) ni negritas. Escribe el texto completamente limpio.
        * Si es 'Nuevo': Aclara que viene en caja sellada. Prohibido inventar porcentajes de batería.
        * Si es 'Usado': Menciona obligatoriamente estado estético, porcentaje de batería y accesorios.
-       Invitación proactiva: Al finalizar, invita a coordinar una visita al local.
+       
+       Al terminar la lista, cierra obligatoriamente preguntando qué número de opción le interesó o si quería consultar por otro modelo.
 
     {reglas_atencion}
 
