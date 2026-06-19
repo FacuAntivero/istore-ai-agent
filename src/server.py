@@ -664,6 +664,7 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         sesiones_chat[session_key] = iniciar_agente(comercio_id, numero_destino)
     chat_actual = sesiones_chat[session_key]
 
+    # 5. Envío a Gemini con Captura de Errores de Cuota de Emergencia 🛡️
     try:
         respuesta = chat_actual.send_message(elementos_prompt)
         texto_respuesta = respuesta.text or "Aguardame un segundo que reviso el sistema..."
@@ -675,8 +676,19 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             simular_escribiendo(numero_destino, instance_name, encendido=False)
 
         enviar_mensaje_whatsapp(numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
+        
     except Exception as e:
-        print(f"[Error Procesamiento] {e}")
+        error_str = str(e)
+        print(f"[Error Procesamiento] {error_str}")
+        
+        # 🚨 INTERCEPTOR CRÍTICO: Si la API de Google se quedó sin recursos (Error 429)
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+            print(f"⚠️ [Cuota Excedida] Enviando mensaje de contingencia a {numero_destino} por saturación de Gemini.")
+            
+            msg_ocupado = "En este momento todos nuestros asesores están ocupados atendiendo a otros clientes. Por favor, aguardanos unos minutitos y volvé a escribirnos. ¡Gracias!"
+            
+            # Despachamos el mensaje predeterminado directamente usando tus parámetros nativos
+            enviar_mensaje_whatsapp(numero_destino, msg_ocupado, instance_name, ultimo_id_mensaje, remote_jid_original)
         
 # --- DETECCIÓN DE TIPOS DE MENSAJE MULTIMEDIA ---
 def extraer_texto_y_tipo(msg_object):
