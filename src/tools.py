@@ -85,19 +85,42 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
 
         fecha_iso = fecha_objetivo.strftime("%Y-%m-%d %H:%M:%S")
 
-        config_res = supabase.table("configuracion_comercios").select("minutos_anticipacion_recordatorio").eq("comercio_id", int(comercio_id)).execute()
+        # 🌟 NUEVO: Obtenemos configuración de cupos y recordatorios
+        config_res = supabase.table("configuracion_comercios").select("minutos_anticipacion_recordatorio, max_citas_por_horario").eq("comercio_id", int(comercio_id)).execute()
         minutos_anticipacion = 30 
-        if config_res.data and config_res.data[0].get("minutos_anticipacion_recordatorio") is not None:
-            minutos_anticipacion = int(config_res.data[0]["minutos_anticipacion_recordatorio"])
+        max_citas = 1
+        
+        if config_res.data:
+            conf = config_res.data[0]
+            if conf.get("minutos_anticipacion_recordatorio") is not None:
+                minutos_anticipacion = int(conf["minutos_anticipacion_recordatorio"])
+            if conf.get("max_citas_por_horario") is not None:
+                max_citas = int(conf["max_citas_por_horario"])
             
         fecha_disparo_recordatorio = fecha_objetivo - timedelta(minutes=minutos_anticipacion)
 
+        # Buscamos si el cliente ya tiene un turno previo
         turno_existente = supabase.table("turnos_clientes") \
             .select("*") \
             .eq("telefono", telefono) \
             .eq("comercio_id", int(comercio_id)) \
             .execute()
+            
+        turno_viejo_id = turno_existente.data[0]["id"] if turno_existente.data else None
 
+        # 🌟 NUEVO: VERIFICACIÓN DE CUPOS DISPONIBLES EN ESE HORARIO EXACTO
+        query_cupos = supabase.table("turnos_clientes").select("id").eq("comercio_id", int(comercio_id)).eq("fecha_turno", fecha_iso).eq("estado", "pendiente")
+        
+        # Si ya tiene un turno y solo lo está modificando, no lo contamos como un ocupante extra para ese mismo horario
+        if turno_viejo_id:
+            query_cupos = query_cupos.neq("id", turno_viejo_id)
+            
+        turnos_en_horario = query_cupos.execute()
+        
+        if len(turnos_en_horario.data) >= max_citas:
+            return f"El cupo para las {fecha_objetivo.strftime('%H:%M')} hs ya está lleno. Dile al cliente que ese horario se acaba de ocupar y ofrécele amablemente un horario cercano (anterior o posterior)."
+
+        # --- A partir de aquí sigue el flujo normal de guardado ---
         if turno_existente.data:
             turno_viejo = turno_existente.data[0]
             viejos_ids = turno_viejo.get("celulares_ids") or []
@@ -178,7 +201,7 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
     
 def _programar_upstash_desde_tools(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
     """Función auxiliar para agendar el recordatorio en QStash desde las tools del bot."""
-    from zoneinfo import ZoneInfo  # 🌟 Importación para manejo seguro de zonas horarias
+    from zoneinfo import ZoneInfo
     
     QSTASH_TOKEN = os.getenv("QSTASH_TOKEN")
     URL_RAILWAY = os.getenv("URL_RAILWAY")
@@ -187,11 +210,9 @@ def _programar_upstash_desde_tools(tipo_evento: str, registro_id: int, fecha_dis
         print("❌ [QStash Tool] Error crítico: QSTASH_TOKEN o URL_RAILWAY no configurados en el entorno.")
         return
     
-    # 🧼 Limpiamos posibles barras diagonales al final para evitar URLs rotas (evita el //api)
     url_base_limpia = URL_RAILWAY.strip("/")
     url_qstash = f"https://qstash.upstash.io/v2/publish/{url_base_limpia}/api/webhooks/disparar-mensaje-programado"
     
-    # 📅 MATEMÁTICA HORARIA CORREGIDA (Evita desfases de 3 horas en producción)
     tz_local = ZoneInfo('America/Argentina/Buenos_Aires')
     if fecha_disparo.tzinfo is None:
         fecha_disparo = fecha_disparo.replace(tzinfo=tz_local)
@@ -209,10 +230,8 @@ def _programar_upstash_desde_tools(tipo_evento: str, registro_id: int, fecha_dis
     payload = {"tipo": tipo_evento, "registro_id": registro_id}
     
     try:
-        # Realizamos la petición a la API de Upstash
         res = requests.post(url_qstash, headers=headers, json=payload)
         
-        # 🚨 VERIFICACIÓN REAL DEL ESTADO HTTP
         if res.status_code in [200, 201, 202]:
             print(f"✅ [QStash Tool] ¡Conexión Exitosa! Cita ID {registro_id} programada en Upstash para dentro de {delay_segundos}s.")
         else:
@@ -255,14 +274,16 @@ def obtener_configuracion_comercio(comercio_id: int) -> dict:
             "permuta_minima": "No especificado",
             "politica_garantia": "Sin garantía",
             "telefono_dueno": tel_dueno, 
-            "requiere_cita": False, # Valor clave: asume local a la calle
+            "requiere_cita": False, 
             "direccion_fisica": "NUESTRO_LOCAL",
             "acepta_canje": False,
             "preguntas_canje": "Qué modelo es? Cuantos gb tiene?",
             "ofrece_servicio_tecnico": False,
             "reparaciones_ofrecidas": "",
             "mensaje_cotizacion_tecnico": "Aguardame un instante que te preparo la cotización sin cargo",
-            "minutos_anticipacion_recordatorio": 15
+            "minutos_anticipacion_recordatorio": 15,
+            "intervalo_citas_minutos": 30,  # 🌟 NUEVO
+            "max_citas_por_horario": 1      # 🌟 NUEVO
         }
         
         # 3. La insertamos para que quede guardada y lista para el frontend

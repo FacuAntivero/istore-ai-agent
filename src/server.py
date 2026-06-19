@@ -1158,7 +1158,6 @@ async def registrar_venta_directa(request: Request):
         print(f"❌ Error en registro de venta directa: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.put("/api/api/turnos/{turno_id}/completar")
 @app.put("/api/turnos/{turno_id}/completar")
 async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: int = None):
     try:

@@ -75,6 +75,7 @@ def iniciar_agente(comercio_id, telefono_cliente):
     # --- LÓGICA DE DIRECCIÓN RESUELTA EN PYTHON (EVITA ERROR "FALTANTE") 📍 ---
     requiere_cita = config_tienda.get('requiere_cita', True)
     direccion_cruda = config_tienda.get('direccion_fisica', '').strip()
+    intervalo_citas = config_tienda.get('intervalo_citas_minutos', 30) # 🌟 EXTRAEMOS EL INTERVALO DE LA BASE DE DATOS
     
     if not direccion_cruda or direccion_cruda.lower() == 'nuestro local':
         mensaje_cierre_cita = "Coordinamos el día y el encargado te pasa la ubicación exacta por acá para que te acerques"
@@ -85,15 +86,18 @@ def iniciar_agente(comercio_id, telefono_cliente):
     if requiere_cita:
         reglas_atencion = f"""
     2. FLUJO DE CITAS Y HORARIOS (Paso previo obligatorio): Cuando ofrezcas agendar una cita para que vean un equipo, ANTES de pedirle sus datos, DEBES ejecutar 'consultar_horarios'. 
+       ⚠️ REGLA DE INTERVALOS ESTRICTA: El local SOLO otorga turnos en fracciones exactas de {intervalo_citas} minutos. 
+       - Si el cliente propone un horario que no encaja en estos intervalos (ej. 10:10 o 10:20), REDONDEA al horario disponible más cercano e indícaselo (Ej: "Te lo puedo agendar a las 10:00 o a las 10:30").
        ⚠️ REGLA DE MEMORIA ESTRICTA: Revisa el historial de mensajes. Si el cliente YA te propuso un día y hora válidos, NO se lo vuelvas a pedir.
        - Si no te dio datos: "Te comento que abrimos de Lunes a Viernes de 09:00 a 18:00. Pasame tu nombre, teléfono y qué día y hora te queda cómodo"
-       - Si YA te propuso fecha y hora (ej: Miércoles a las 17:30): "Dale, te comento que los Miércoles estamos de 09:00 a 18:00, así que esa hora nos queda genial. Pasame tu nombre y teléfono así ya te dejo agendado"
+       - Si YA te propuso fecha y hora: "Dale, te comento que los días indicados estamos de 09:00 a 18:00, así que esa hora nos queda genial. Pasame tu nombre y teléfono así ya te dejo agendado"
 
-    3. AGENDAMIENTO EN DOS PASOS (CONFIRMACIÓN EXPLÍCITA): 
+    3. AGENDAMIENTO EN DOS PASOS Y RECHAZOS (CONFIRMACIÓN EXPLÍCITA): 
        - Paso 1: Haz la pregunta de confirmación directa basándote en el calendario estricto. Ej: "Perfecto, te queda bien entonces para el Miércoles 17 de Junio a las 17:30 hs? Confirmame"
        - Paso 2: SOLO cuando el cliente confirme explícitamente ("Sí", "Dale"), ejecutas la herramienta 'agendar_cita'.
        ⚠️ REGLA DE FECHA: Al ejecutar 'agendar_cita', mapea correctamente el número de opción elegido por el cliente al ID exacto del JSON del inventario. La 'fecha_turno' DEBE enviarse como 'YYYY-MM-DD HH:MM:00'.
-       - Paso 3: Una vez que agendes con éxito, despídete del cliente indicándole EXACTAMENTE este mensaje: "{mensaje_cierre_cita}"
+       - Paso 3: Si la herramienta 'agendar_cita' responde que el cupo está lleno para ese horario, PIDE DISCULPAS al cliente explicándole que ese horario se acaba de ocupar, y ofrécele amablemente otro horario cercano.
+       - Paso 4: Una vez que agendes con éxito, despídete del cliente indicándole EXACTAMENTE este mensaje: "{mensaje_cierre_cita}"
         """
     else:
         reglas_atencion = f"""
