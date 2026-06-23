@@ -93,7 +93,7 @@ class NumeroExcluidoInput(BaseModel):
     
 app.add_middleware(NgrokHeaderMiddleware)
 
-_lock_whatsapp = threading.Lock()
+_lock_whatsapp = None
 _ultimo_envio_timestamp = 0.0
 
 @app.get("/api/numeros-excluidos/{comercio_id}")
@@ -449,69 +449,15 @@ def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
         
     return None
 
-def guardar_contacto(lid, numero, nombre, comercio_id):
-    try:
-        if numero == MI_NUMERO or numero.endswith("@lid"):
-            return
-        result = supabase.table("contactos").select("numero").eq("lid", lid).eq("comercio_id", comercio_id).execute()
-        if result.data:
-            return
-        supabase.table("contactos").insert({
-            "lid": lid,
-            "numero": numero,
-            "nombre": nombre,
-            "comercio_id": comercio_id
-        }).execute()
-        print(f"[Supabase] ✅ Contacto guardado con éxito: {lid} → {numero} (Comercio ID: {comercio_id})")
-    except Exception as e:
-        print(f"[Supabase] ❌ Error guardando contacto: {e}")
-
-def obtener_numero_real(lid, comercio_id, nombre_push, instance_name):
-    try:
-        id_limpio = int(comercio_id) if comercio_id is not None else None
-        result = supabase.table("contactos").select("numero", "comercio_id", "nombre").eq("lid", lid).execute()
-        
-        if result.data:
-            for contacto in result.data:
-                if contacto.get("comercio_id") == id_limpio:
-                    return contacto["numero"]
-            
-            numero_real = result.data[0]["numero"]
-            nombre_cliente = nombre_push if nombre_push else result.data[0].get("nombre", "Cliente")
-            print(f"[SaaS Link] 🔗 LID detectado en la red global. Vinculando número {numero_real} al comercio {id_limpio}")
-            guardar_contacto(lid, numero_real, nombre_cliente, id_limpio)
-            return numero_real
-            
-        if lid.endswith("@lid"):
-            print(f"⚠️ [Motor de Búsqueda] {lid} es un ID enmascarado nuevo. Saltando fetchProfile para evitar bloqueo 400 de Evolution API.")
-            return None
-            
-        print(f"🔍 [Motor de Búsqueda] {lid} no encontrado en DB. Consultando a Evolution API...")
-        url_profile = f"{EVOLUTION_API_URL}/chat/fetchProfile/{instance_name}"
-        headers = {"apikey": API_KEY, "Content-Type": "application/json"}
-        payload = {"number": lid}
-        
-        respuesta = requests.post(url_profile, headers=headers, json=payload, timeout=5)
-        
-        if respuesta.status_code in [200, 201]:
-            res_data = respuesta.json()
-            data_obj = res_data[0] if isinstance(res_data, list) and len(res_data) > 0 else res_data
-            id_real = None
-            if isinstance(data_obj, dict):
-                id_real = data_obj.get("id") or data_obj.get("jid") or data_obj.get("number")
-                
-            if id_real and id_real.endswith("@s.whatsapp.net"):
-                print(f"🎯 [Evolution API] Encontrado número real: {id_real}")
-                nombre_cliente = nombre_push if nombre_push else "Cliente"
-                guardar_contacto(lid, id_real, nombre_cliente, id_limpio)
-                return id_real
-    except Exception as e:
-        print(f"[Supabase/Evolution] ❌ Error en la red de seguridad global: {e}")
-    return None
-
 async def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    global _ultimo_envio_timestamp
+    global _ultimo_envio_timestamp, _lock_whatsapp
     
+    # 🌟 INICIALIZACIÓN PEREZOSA DEL CANDADO ASÍNCRONO
+    # Se crea la primera vez que se llama a la función, ya dentro del Event Loop de FastAPI
+    if _lock_whatsapp is None:
+        import asyncio # Por si no lo tenías importado arriba
+        _lock_whatsapp = asyncio.Lock()
+
     # 1. CALCULAR DELAY DE ESCRITURA (Tu lógica genial se mantiene)
     delay_milisegundos = min(max(len(texto) * 30 + random.randint(800, 1500), 1200), 3500)
     
