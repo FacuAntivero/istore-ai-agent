@@ -509,26 +509,10 @@ def obtener_numero_real(lid, comercio_id, nombre_push, instance_name):
         print(f"[Supabase/Evolution] ❌ Error en la red de seguridad global: {e}")
     return None
 
-def simular_escribiendo(numero_destino, instance_name, encendido=True):
-    url = f"{EVOLUTION_API_URL}/chat/sendPresence/{instance_name}?checkNumber=false"
-    headers = {"apikey": API_KEY, "Content-Type": "application/json"}
-    payload = {
-        "number": numero_destino,
-        "presence": "composing" if encendido else "available",
-        "delay": 0,
-        "checkNumber": False
-    }
-    try:
-        requests.post(url, headers=headers, json=payload)
-    except Exception:
-        pass
-
-def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
+async def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
     global _ultimo_envio_timestamp
     
-    # 1. CALCULAR DELAY DE ESCRITURA (Para el "Escribiendo...")
-    # Ajustado: 30ms por caracter. Base mínima de 1.2s y máxima de 3.5s.
-    # Esto lo hace sentir más humano y menos instantáneo.
+    # 1. CALCULAR DELAY DE ESCRITURA (Tu lógica genial se mantiene)
     delay_milisegundos = min(max(len(texto) * 30 + random.randint(800, 1500), 1200), 3500)
     
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
@@ -540,7 +524,7 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
         "checkNumber": False,       
         "verifyNumber": False,      
         "options": {
-            "delay": delay_milisegundos, # 🌟 Muestra "Escribiendo..." por este tiempo en WhatsApp
+            "delay": delay_milisegundos, # Evolution maneja el "Escribiendo..." automáticamente con esto
             "checkNumber": False    
         }
     }
@@ -550,45 +534,77 @@ def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=Non
             "key": {"id": id_mensaje, "remoteJid": remote_jid, "fromMe": False}
         }
         
-    # 2. PROTEGER EL ENVÍO CON EL FILTRO ANTI-RÁFAGA GLOBAL
-    with _lock_whatsapp:
+    # 2. PROTEGER EL ENVÍO CON EL FILTRO ANTI-RÁFAGA (Versión Async)
+    async with _lock_whatsapp:
         ahora = time.time()
         tiempo_transcurrido = ahora - _ultimo_envio_timestamp
         
-        # Si pasó menos de 1.5 segundos desde el último envío (a cualquier chat), esperamos la diferencia
         if tiempo_transcurrido < 1.5:
             tiempo_espera = 1.5 - tiempo_transcurrido
-            print(f"⏳ [Anti-Ban] Mensaje en cola. Esperando {tiempo_espera:.2f}s para respetar el límite global.")
-            time.sleep(tiempo_espera)
+            print(f"⏳ [Anti-Ban] Esperando {tiempo_espera:.2f}s sin bloquear el servidor...")
+            # 🌟 MAGIA ACÁ: Esperamos, pero dejamos que el servidor atienda a otros comercios mientras tanto
+            await asyncio.sleep(tiempo_espera) 
         
-        # Actualizamos el timestamp del último mensaje despachado
         _ultimo_envio_timestamp = time.time()
 
         try:
-            respuesta = requests.post(url, headers=headers, json=payload)
+            # Mandamos la petición al webhook de Evolution
+            # Nota: Usar asyncio.to_thread evita que requests (que es síncrono) trabe el event loop brevemente
+            respuesta = await asyncio.to_thread(requests.post, url, headers=headers, json=payload)
+            
             if respuesta.status_code in [200, 201]:
-                print(f"✅ Mensaje despachado con éxito a {numero_destino} (Delay simulación: {delay_milisegundos}ms)")
+                print(f"✅ Mensaje a {numero_destino} (Delay: {delay_milisegundos}ms)")
             else:
-                print(f"❌ Error al enviar a WhatsApp: {respuesta.text}")
+                print(f"❌ Error WhatsApp: {respuesta.text}")
         except Exception as e:
             print(f"❌ Error crítico de red: {e}")
 
-# --- FUNCIÓN DE ALERTA AL DUEÑO ---
-def alertar_consumo_dueno(telefono_dueno, porcentaje, mensajes_restantes, instance_name):
-    if not telefono_dueno: return
-    tel_dueno_jid = telefono_dueno.strip()
-    if not tel_dueno_jid.endswith("@s.whatsapp.net"): tel_dueno_jid = f"{tel_dueno_jid}@s.whatsapp.net"
+# --- FUNCIÓN DE ALERTA AL DUEÑO (PREVIA) ---
+async def alertar_consumo_dueno(telefono_dueno, porcentaje, mensajes_restantes, instance_name):
+    if not telefono_dueno: 
+        return
+        
+    tel_dueno_limpio = telefono_dueno.replace("+", "").replace(" ", "").strip()
     
-    emoji = "⚠️" if porcentaje == 80 else "🚨"
+    if not tel_dueno_limpio.endswith("@s.whatsapp.net"): 
+        tel_dueno_jid = f"{tel_dueno_limpio}@s.whatsapp.net"
+    else:
+        tel_dueno_jid = tel_dueno_limpio
+    
+    emoji = "⚠️" if porcentaje <= 80 else "🚨"
+    
     mensaje = (
         f"{emoji} *Aviso de Consumo del Bot*\n\n"
         f"Tu bot ha consumido el *{porcentaje}%* de los mensajes de tu plan actual.\n"
         f"Te quedan: *{mensajes_restantes} mensajes*.\n\n"
         f"Por favor, renová tu plan pronto desde el panel para evitar que el bot se detenga."
     )
-    enviar_mensaje_whatsapp(tel_dueno_jid, mensaje, instance_name)
+    
+    # 🌟 Agregamos await
+    await enviar_mensaje_whatsapp(tel_dueno_jid, mensaje, instance_name)
     print(f"📢 [ALERTA] Aviso de {porcentaje}% enviado al dueño ({tel_dueno_jid})")
 
+# --- NUEVA FUNCIÓN DE ALERTA POR SUSPENSIÓN DE SERVICIO (SALDO 0) ---
+async def alertar_suspension_dueno(telefono_dueno, instance_name):
+    if not telefono_dueno: return
+    
+    tel_dueno_limpio = telefono_dueno.replace("+", "").replace(" ", "").strip()
+    if not tel_dueno_limpio.endswith("@s.whatsapp.net"):
+        tel_dueno_jid = f"{tel_dueno_limpio}@s.whatsapp.net"
+    else:
+        tel_dueno_jid = tel_dueno_limpio
+
+    mensaje = (
+        "🛑 *BOT PAUSADO - ACCIÓN REQUERIDA*\n\n"
+        f"Tu asistente virtual de la instancia *{instance_name}* se ha quedado sin mensajes disponibles y ha dejado de responder a tus clientes.\n\n"
+        "Para reactivar el servicio de inmediato y no perder ventas, por favor ingresá a tu panel y realizá la recarga o renovación de tu plan.\n\n"
+        "👉 _Tus clientes seguirán escribiendo, pero el bot no intervendrá hasta que restaures el saldo._"
+    )
+    
+    # 🌟 Agregamos await
+    await enviar_mensaje_whatsapp(tel_dueno_jid, mensaje, instance_name)
+    print(f"🛑 [SaaS - SUSPENSIÓN] Se notificó al dueño ({tel_dueno_jid}) que el bot se quedó en 0.")
+    
 async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original):
     # 1. Filtro de seguridad inicial
     if verificar_numero_excluido(id_remitente_limpio, comercio_id):
@@ -608,7 +624,9 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         
         if comercio_db:
             estado = str(comercio_db.get("estado_suscripcion", "trial")).lower().strip()
-            plan_actual = str(comercio_db.get("plan_actual", "basico")).lower().strip()
+            plan_actual_db = str(comercio_db.get("plan_actual", "basico")).lower().strip()
+            plan_actual = plan_actual_db.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+            
             tel_dueno = comercio_db.get("telefono_dueno")
             creditos_demo = comercio_db.get("creditos_demo", 0)
             saldo_mensajes = comercio_db.get("mensajes_disponibles", 0)
@@ -619,9 +637,14 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             saldo_actual = creditos_demo if es_trial else saldo_mensajes
 
             if saldo_actual <= 0:
-                print(f"🚫 [SaaS] Comercio {comercio_id} sin créditos. Bloqueando respuesta.")
-                msg_bloqueo = "Lo siento, este asistente ha finalizado su periodo de prueba. Por favor contacta con el administrador del comercio para continuar."
-                enviar_mensaje_whatsapp(numero_destino, msg_bloqueo, instance_name, None, remote_jid_original)
+                print(f"🚫 [SaaS] Comercio {comercio_id} sin créditos. Bloqueando respuesta silenciosamente.")
+                
+                try:
+                    # 🌟 AGREGAMOS AWAIT a la alerta de suspensión
+                    await alertar_suspension_dueno(tel_dueno, instance_name)
+                except Exception as e:
+                    print(f"⚠️ No se pudo enviar la alerta de suspensión al dueño: {e}")
+
                 buffer_mensajes.pop(id_remitente_limpio, None)
                 return
 
@@ -630,7 +653,9 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
                 nuevo_saldo = creditos_demo - 1
                 supabase.table("comercios").update({"creditos_demo": nuevo_saldo}).eq("id", comercio_id).execute()
                 print(f"✅ [SaaS] Descontado de TRIAL. Quedan: {nuevo_saldo}")
-                if nuevo_saldo in [10, 2]: alertar_consumo_dueno(tel_dueno, 90 if nuevo_saldo == 10 else 95, nuevo_saldo, instance_name)
+                if nuevo_saldo in [10, 2]: 
+                    # 🌟 AGREGAMOS AWAIT
+                    await alertar_consumo_dueno(tel_dueno, 90 if nuevo_saldo == 10 else 95, nuevo_saldo, instance_name)
             else:
                 nuevo_saldo = saldo_mensajes - 1
                 supabase.table("comercios").update({"mensajes_disponibles": nuevo_saldo}).eq("id", comercio_id).execute()
@@ -638,7 +663,8 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
                 topes = {"basico": 1000, "pro": 3500, "premium": 10000}
                 limite = topes.get(plan_actual, 1000)
                 if nuevo_saldo == int(limite * 0.20) or nuevo_saldo == int(limite * 0.05):
-                    alertar_consumo_dueno(tel_dueno, 80 if nuevo_saldo > (limite * 0.1) else 95, nuevo_saldo, instance_name)
+                    # 🌟 AGREGAMOS AWAIT
+                    await alertar_consumo_dueno(tel_dueno, 80 if nuevo_saldo > (limite * 0.1) else 95, nuevo_saldo, instance_name)
         else:
             return
     except Exception as e:
@@ -669,13 +695,7 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         respuesta = chat_actual.send_message(elementos_prompt)
         texto_respuesta = respuesta.text or "Aguardame un segundo que reviso el sistema..."
             
-        # Simulación de tipeo humano
-        if os.getenv("SIMULATE_HUMAN_DELAY", "true").lower() == "true":
-            simular_escribiendo(numero_destino, instance_name, encendido=True)
-            await asyncio.sleep(min(round(len(texto_respuesta) * 0.06 + 3.0, 1), 20.0))
-            simular_escribiendo(numero_destino, instance_name, encendido=False)
-
-        enviar_mensaje_whatsapp(numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
+        await enviar_mensaje_whatsapp(numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
         
     except Exception as e:
         error_str = str(e)
@@ -687,9 +707,9 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             
             msg_ocupado = "En este momento todos nuestros asesores están ocupados atendiendo a otros clientes. Por favor, aguardanos unos minutitos y volvé a escribirnos. ¡Gracias!"
             
-            # Despachamos el mensaje predeterminado directamente usando tus parámetros nativos
-            enviar_mensaje_whatsapp(numero_destino, msg_ocupado, instance_name, ultimo_id_mensaje, remote_jid_original)
-        
+            # 🌟 AGREGAMOS AWAIT también en la contingencia
+            await enviar_mensaje_whatsapp(numero_destino, msg_ocupado, instance_name, ultimo_id_mensaje, remote_jid_original)
+            
 # --- DETECCIÓN DE TIPOS DE MENSAJE MULTIMEDIA ---
 def extraer_texto_y_tipo(msg_object):
     if not isinstance(msg_object, dict): return None, "text"
