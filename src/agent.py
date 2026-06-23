@@ -72,15 +72,15 @@ def iniciar_agente(comercio_id, telefono_cliente):
         calendario_proximos_dias.append(obtener_fecha_str(dia_futuro))
     str_calendario = " | ".join(calendario_proximos_dias)
 
-    # --- LÓGICA DE DIRECCIÓN RESUELTA EN PYTHON (EVITA ERROR "FALTANTE") 📍 ---
+    # --- LÓGICA DE DIRECCIÓN MEJORADA PARA CONFIRMACIÓN 📍 ---
     requiere_cita = config_tienda.get('requiere_cita', True)
     direccion_cruda = config_tienda.get('direccion_fisica', '').strip()
-    intervalo_citas = config_tienda.get('intervalo_citas_minutos', 30) # 🌟 EXTRAEMOS EL INTERVALO DE LA BASE DE DATOS
+    intervalo_citas = config_tienda.get('intervalo_citas_minutos', 30)
     
     if not direccion_cruda or direccion_cruda.lower() == 'nuestro local':
-        mensaje_cierre_cita = "Coordinamos el día y el encargado te pasa la ubicación exacta por acá para que te acerques"
+        direccion_final = "nuestro local (el encargado te pasará la ubicación exacta por acá)"
     else:
-        mensaje_cierre_cita = f"Te esperamos en nuestra dirección: {direccion_cruda}"
+        direccion_final = direccion_cruda
 
     # --- REGLAS DE ATENCIÓN ACTUALIZADAS ---
     if requiere_cita:
@@ -97,13 +97,14 @@ def iniciar_agente(comercio_id, telefono_cliente):
        - Paso 2: SOLO cuando el cliente confirme explícitamente ("Sí", "Dale"), ejecutas la herramienta 'agendar_cita'.
        ⚠️ REGLA DE FECHA: Al ejecutar 'agendar_cita', mapea correctamente el número de opción elegido por el cliente al ID exacto del JSON del inventario. La 'fecha_turno' DEBE enviarse como 'YYYY-MM-DD HH:MM:00'.
        - Paso 3: Si la herramienta 'agendar_cita' responde que el cupo está lleno para ese horario, PIDE DISCULPAS al cliente explicándole que ese horario se acaba de ocupar, y ofrécele amablemente otro horario cercano.
-       - Paso 4: Una vez que agendes con éxito, despídete del cliente indicándole EXACTAMENTE este mensaje: "{mensaje_cierre_cita}"
+       - Paso 4: Cierre y Confirmación (OBLIGATORIO). Una vez que agendes con éxito, despídete confirmando TODOS los datos. Usa esta estructura exacta: "¡Perfecto! El turno quedó confirmado para el [Día y Fecha] a las [Hora] hs. Te esperamos en {direccion_final}"
+       - Paso 5: REPROGRAMACIONES. Si en el historial ves que el cliente YA había sacado un turno previo y te pidió otro, el sistema lo actualizará automáticamente. En tu mensaje de confirmación aclarale: "Vi que ya tenías un turno previo, así que te lo reprogramé para el [Nueva Fecha] a las [Hora] hs. Te esperamos en {direccion_final}"
         """
     else:
         reglas_atencion = f"""
     2. MODALIDAD DE ATENCIÓN DIRECTA (LOCAL AL PÚBLICO): El local atiende de forma directa sin necesidad de cita previa.
        BAJO NINGUNA CIRCUNSTANCIA intentes agendar turnos ni pidas datos al cliente para coordinar citas.
-       Si el cliente desea ver o retirar un equipo, ejecuta la herramienta 'consultar_horarios', indícale los días y horarios, y dile de forma entusiasta que puede acercarse directamente. Finaliza indicando: "{mensaje_cierre_cita}"
+       Si el cliente desea ver o retirar un equipo, ejecuta la herramienta 'consultar_horarios', indícale los días y horarios, y dile de forma entusiasta que puede acercarse directamente. Finaliza indicando: "Te esperamos en {direccion_final}"
         """
 
     # --- CONTROL DINÁMICO DE PLAN CANJE ---
@@ -159,10 +160,13 @@ def iniciar_agente(comercio_id, telefono_cliente):
     - Si el cliente SOLO saluda (Ej: "Hola", "Buenos días"): Preséntate diciendo exactamente "Hola, somos {nombre_tienda}. ¿En qué te podemos ayudar?".
     - Si el cliente saluda Y hace una consulta en el mismo mensaje (Ej: "Hola, busco un iPhone 15 Pro"): Preséntate brevemente diciendo "Hola, somos {nombre_tienda}." y procede directamente a responder su consulta o listar los equipos. ESTÁ ESTRICTAMENTE PROHIBIDO preguntar "¿En qué te podemos ayudar?" si el cliente ya te indicó qué está buscando.
     
+    🌟 REGLA DE RESPUESTA MÚLTIPLE (ANTIVISIÓN DE TÚNEL): 
+    Si el usuario te hace MÁS DE UNA PREGUNTA en un mismo mensaje (Ej: "Se puede pagar con USDT? Puedo ir a verlo?"), DEBES responder obligatoriamente a TODAS sus dudas en tu mensaje de respuesta antes de avanzar con el flujo de reserva. ¡No ignores preguntas de métodos de pago o características!
+
     CONTEXTO TEMPORAL ACTUAL ESTRICTO: Hoy es {fecha_actual_str}.
-    Para calcular cualquier fecha futura que pida el cliente, aquí tienes el calendario exacto de los próximos días: 
+    Para calcular cualquier fecha futura (como "mañana" o "el próximo martes") que pida el cliente, TIENES QUE MIRAR OBLIGATORIAMENTE el siguiente calendario de los próximos días: 
     [ {str_calendario} ]
-    Úsalo como referencia absoluta para no equivocarte de día ni de fecha numérica.
+    Úsalo como referencia absoluta y literal para no equivocarte de día ni de fecha numérica.
 
     POLÍTICAS COMERCIALES ESPECÍFICAS DE ESTA TIENDA:
     - Métodos de pago aceptados: {config_tienda.get('metodos_pago', '')}
