@@ -455,7 +455,6 @@ async def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensa
     # 🌟 INICIALIZACIÓN PEREZOSA DEL CANDADO ASÍNCRONO
     # Se crea la primera vez que se llama a la función, ya dentro del Event Loop de FastAPI
     if _lock_whatsapp is None:
-        import asyncio # Por si no lo tenías importado arriba
         _lock_whatsapp = asyncio.Lock()
 
     # 1. CALCULAR DELAY DE ESCRITURA (Tu lógica genial se mantiene)
