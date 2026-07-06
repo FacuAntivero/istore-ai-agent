@@ -7,8 +7,8 @@ from zoneinfo import ZoneInfo
 
 client = genai.Client(api_key=config.GEMINI_API_KEY)
 
-def iniciar_agente(comercio_id, telefono_cliente): 
-    
+def iniciar_agente(comercio_id, telefono_cliente, historial_base=None):
+        
     # Traemos las políticas y datos desde Supabase
     config_tienda = tools.obtener_configuracion_comercio(comercio_id)
     
@@ -218,15 +218,27 @@ def iniciar_agente(comercio_id, telefono_cliente):
        - Sos un asesor del negocio de celulares. Si el usuario te tira un modelo parcial o número (Ej: "14", "15 pro"), ASUME que es un celular. SOLO activa el mensaje de "Disculpame, pero de eso no tengo info..." cuando te pregunten sobre cosas TOTALMENTE ajenas a tecnología (autos, ropa, política, etc.).
     """
     
+    historial_gemini = []
+    if historial_base:
+        for reg in historial_base:
+            historial_gemini.append(
+                types.Content(
+                    role=reg["rol"], # 'user' o 'model'
+                    parts=[types.Part.from_text(text=reg["contenido"])]
+                )
+            )
+
     configuracion_ia = types.GenerateContentConfig(
         system_instruction=instrucciones,
         tools=[consultar_inventario, consultar_horarios, agendar_cita, solicitar_asistencia_humana],
         temperature=0.2, 
     )
     
+    # Creamos el chat inyectándole su memoria pasada si existía
     chat = client.chats.create(
         model='gemini-2.5-flash',
-        config=configuracion_ia
+        config=configuracion_ia,
+        history=historial_gemini if historial_gemini else None
     )
     
     return chat

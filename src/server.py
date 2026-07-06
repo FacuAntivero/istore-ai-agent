@@ -551,13 +551,11 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     # 1. Filtro de seguridad inicial
     if verificar_numero_excluido(id_remitente_limpio, comercio_id):
         print(f"🤫 [Filtro Blacklist] Mensaje de {id_remitente_limpio} ignorado.")
-        # Limpiamos la cola en Redis silenciosamente
         await obtener_y_limpiar_buffer(id_remitente_limpio)
         return
 
     # 2. Extraemos y limpiamos la lista de mensajes DIRECTO de Redis
     mensajes = await obtener_y_limpiar_buffer(id_remitente_limpio)
-    
     if not mensajes:
         return
 
@@ -565,9 +563,8 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     timers_debounce.pop(id_remitente_limpio, None)
 
     try:
-        # 3. Obtención de datos FUERZANDO actualización (Ahora con await)
+        # 3. Obtención de datos FUERZANDO actualización
         comercio_db = await obtener_comercio(instance_name, forzar_actualizacion=True)
-        
         if comercio_db:
             estado = str(comercio_db.get("estado_suscripcion", "trial")).lower().strip()
             plan_actual_db = str(comercio_db.get("plan_actual", "basico")).lower().strip()
@@ -577,32 +574,26 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             creditos_demo = comercio_db.get("creditos_demo", 0)
             saldo_mensajes = comercio_db.get("mensajes_disponibles", 0)
 
-            print(f"DEBUG SAAS -> Comercio: {comercio_id} | Estado: {estado} | Créditos: {creditos_demo}/{saldo_mensajes}")
-
             es_trial = (estado == "trial")
             saldo_actual = creditos_demo if es_trial else saldo_mensajes
 
             if saldo_actual <= 0:
                 print(f"🚫 [SaaS] Comercio {comercio_id} sin créditos. Bloqueando respuesta silenciosamente.")
-                
                 try:
                     await alertar_suspension_dueno(tel_dueno, instance_name)
                 except Exception as e:
                     print(f"⚠️ No se pudo enviar la alerta de suspensión al dueño: {e}")
-
-                return # Ya vaciamos el buffer de Redis arriba, solo salimos.
+                return
 
             # Realizar el descuento
             if es_trial:
                 nuevo_saldo = creditos_demo - 1
                 supabase.table("comercios").update({"creditos_demo": nuevo_saldo}).eq("id", comercio_id).execute()
-                print(f"✅ [SaaS] Descontado de TRIAL. Quedan: {nuevo_saldo}")
                 if nuevo_saldo in [10, 2]: 
                     await alertar_consumo_dueno(tel_dueno, 90 if nuevo_saldo == 10 else 95, nuevo_saldo, instance_name)
             else:
                 nuevo_saldo = saldo_mensajes - 1
                 supabase.table("comercios").update({"mensajes_disponibles": nuevo_saldo}).eq("id", comercio_id).execute()
-                print(f"✅ [SaaS] Descontado de PLAN. Quedan: {nuevo_saldo}")
                 topes = {"basico": 1000, "pro": 3500, "premium": 10000}
                 limite = topes.get(plan_actual, 1000)
                 if nuevo_saldo == int(limite * 0.20) or nuevo_saldo == int(limite * 0.05):
@@ -618,8 +609,6 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
 
     for m in mensajes:
         textos_del_bloque.append(m["texto"])
-        
-        # 🌟 MAGIA REDIS: Decodificamos el base64 del audio si existe
         if "audio_b64" in m and m["audio_b64"]:
             audio_bytes_reales = base64.b64decode(m["audio_b64"])
             parte_audio = types.Part.from_bytes(data=audio_bytes_reales, mime_type="audio/ogg")
@@ -629,9 +618,27 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     elementos_prompt.append(texto_completo)
     ultimo_id_mensaje = mensajes[-1]["id_mensaje"]
     
+    # 🧠 INTEGRACIÓN DE MEMORIA HISTÓRICA A LARGO PLAZO
     session_key = f"{comercio_id}_{id_remitente_limpio}"
     if session_key not in sesiones_chat:
-        sesiones_chat[session_key] = iniciar_agente(comercio_id, numero_destino)
+        try:
+            # Consultamos los últimos 20 mensajes de este cliente en Supabase (en un hilo para no bloquear descargas)
+            res_historial = await asyncio.to_thread(
+                lambda: supabase.table("historial_chat_ia")
+                .select("rol", "contenido")
+                .eq("telefono_cliente", id_remitente_limpio)
+                .order("created_at", descending=False)
+                .limit(20)
+                .execute()
+            )
+            historial_previo = res_historial.data if res_historial.data else []
+        except Exception as e:
+            print(f"⚠️ [Supabase Error] No se pudo recuperar el historial para {id_remitente_limpio}: {e}")
+            historial_previo = []
+            
+        # Inicializamos el agente pasándole la lista de diccionarios cruda de la BD
+        sesiones_chat[session_key] = iniciar_agente(comercio_id, numero_destino, historial_base=historial_previo)
+        
     chat_actual = sesiones_chat[session_key]
 
     # 5. Envío a Gemini con Captura de Errores de Cuota de Emergencia
@@ -641,6 +648,17 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             
         await enviar_mensaje_whatsapp(numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
         
+        # 💾 GUARDADO ATÓMICO EN LA MEMORIA DE SUPABASE
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("historial_chat_ia").insert([
+                    {"telefono_cliente": id_remitente_limpio, "rol": "user", "contenido": texto_completo},
+                    {"telefono_cliente": id_remitente_limpio, "rol": "model", "contenido": texto_respuesta}
+                ]).execute()
+            )
+        except Exception as db_err:
+            print(f"❌ [Supabase Error] No se pudo guardar el nuevo bloque en el historial: {db_err}")
+            
     except Exception as e:
         error_str = str(e)
         print(f"[Error Procesamiento] {error_str}")
@@ -736,16 +754,22 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             
             if texto_saliente and tipo == "text":
                 session_key = f"{comercio_id}_{id_remitente_limpio}"
-                if session_key not in sesiones_chat:
-                    sesiones_chat[session_key] = iniciar_agente(comercio_id, numero_destino)
                 
-                sesiones_chat[session_key].history.append(
-                    types.Content(
-                        role="model", 
-                        parts=[types.Part.from_text(text=texto_saliente)]
+                # 1. Guardamos en Supabase para la memoria eterna
+                try:
+                    await asyncio.to_thread(
+                        lambda: supabase.table("historial_chat_ia").insert({
+                            "telefono_cliente": id_remitente_limpio,
+                            "rol": "model",
+                            "contenido": texto_saliente
+                        }).execute()
                     )
-                )
-                print(f"🧠 [Contexto Inyectado] Gemini ahora sabe que le dijimos: {texto_saliente[:30]}...")
+                except Exception as db_err:
+                    print(f"❌ [Supabase Context Error] No se pudo guardar el mensaje saliente humano: {db_err}")
+
+                # 2. ⚡ TRUCO: Borramos de la RAM para forzar la reconstrucción desde DB en el próximo mensaje
+                sesiones_chat.pop(session_key, None)
+                print(f"🧠 [Contexto Híbrido] Mensaje humano guardado en DB y sesión RAM reseteada para {id_remitente_limpio}")
             return {"status": "contexto_guardado"}
 
         id_mensaje = key.get("id", "")
@@ -922,7 +946,7 @@ async def webhook_mercadopago(request: Request):
                 mensajes_por_plan = {"basico": 1000, "pro": 3500, "premium": 10000}
                 mensajes_a_cargar = mensajes_por_plan.get(tipo_plan, 3500)
                 
-                fecha_vencimiento = (datetime.utcnow() + timedelta(days=30)).isoformat()
+                fecha_vencimiento = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
                 
                 # 3. ACTUALIZACIÓN ATÓMICA CON SELLO DE PAGO
                 # Actualizamos el plan y sellamos el comercio con este payment_id
@@ -1016,8 +1040,8 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
                 texto_campana = f"¡Hola {primer_nombre}! Gracias por tu compra de {equipos_string} con nosotros. ¡Estamos a tu disposición!"
 
         # 4. 🌟 CAMBIO CLAVE: Calculamos la fecha y HORA EXACTA del disparo
-        fecha_disparo_dt = datetime.now() + timedelta(days=dias_delay)
-
+        fecha_disparo_dt = datetime.now(timezone.utc) + timedelta(days=dias_delay)
+        
         payload_postventa = {
             "comercio_id": comercio_id,
             "cliente_nombre": cliente_nombre,
