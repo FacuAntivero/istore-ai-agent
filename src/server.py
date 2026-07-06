@@ -1011,8 +1011,8 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
         
         if str(estrategia_o_plantilla).isdigit():
             plantilla_id = int(estrategia_o_plantilla)
-            plantilla_res = supabase.table("plantillas_postventa").eq("id", plantilla_id).execute()
-            
+            plantilla_res = supabase.table("plantillas_postventa").select("*").eq("id", plantilla_id).execute()  
+                      
             if plantilla_res.data:
                 plantilla = plantilla_res.data[0]
                 dias_delay = plantilla["dias_espera"]
