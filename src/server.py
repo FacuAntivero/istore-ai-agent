@@ -6,6 +6,7 @@ import base64
 import requests
 import json
 import asyncio
+from collections import defaultdict
 import mercadopago
 import threading
 from datetime import datetime, timedelta, timezone  # 🌟 AGREGUÉ timezone PARA QSTASH
@@ -35,6 +36,11 @@ app = FastAPI(title="iStore AI Webhook")
 # --- 🚦 SISTEMA DE COLA GLOBAL ANTI-BANEO ---
 cola_mensajes = asyncio.Queue()
 
+from redis_client import (
+    es_mensaje_procesado, es_pago_procesado, agregar_al_buffer, 
+    obtener_y_limpiar_buffer, guardar_cache_comercio, obtener_cache_comercio
+)
+
 async def worker_procesador_cola():
     """Trabajador en segundo plano que procesa los mensajes UNO POR UNO."""
     print("👷 Worker de mensajes iniciado y esperando trabajo...")
@@ -44,10 +50,7 @@ async def worker_procesador_cola():
         id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original = tarea
         
         try:
-            # Al usar await acá, el worker SE TRABA hasta que Gemini responde,
-            # simula el tipeo y envía el mensaje por WhatsApp.
-            # Esto garantiza que JAMÁS salgan mensajes en paralelo a distintos clientes.
-            # (Python encontrará procesar_bloque_mensajes porque se define más abajo en el archivo)
+            
             await procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original)
             
             # Pequeña pausa extra humana entre clientes (1 a 3 segundos) antes de leer al siguiente
@@ -93,7 +96,7 @@ class NumeroExcluidoInput(BaseModel):
     
 app.add_middleware(NgrokHeaderMiddleware)
 
-_lock_whatsapp = None
+locks_por_instancia = defaultdict(asyncio.Lock)
 _ultimo_envio_timestamp = 0.0
 
 @app.get("/api/numeros-excluidos/{comercio_id}")
@@ -368,10 +371,8 @@ else:
     print("⚠️ ADVERTENCIA: No se encontró MERCADOPAGO_ACCESS_TOKEN en el .env")
 
 sesiones_chat = {}
-mensajes_procesados = set()
 
 # --- DICCIONARIOS PARA EL DEBOUNCER Y ANTI-TROLL ---
-buffer_mensajes = {}
 timers_debounce = {}
 rate_limiter = {} # Guarda: { "numero_remitente": [timestamp1, timestamp2...] }
 ultimo_aviso_audio = {} # Anti-Spam: Guarda { "id_remitente": timestamp_ultimo_aviso }
@@ -383,21 +384,25 @@ API_KEY = "74BD7CFB-C38A-4143-833A-FCEA92FBBA21"
 
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
-CACHE_COMERCIOS = {}
 
-def obtener_comercio(instancia, forzar_actualizacion=False):
-    # Si no forzamos, revisamos el caché
-    if not forzar_actualizacion and instancia in CACHE_COMERCIOS:
-        # Opcional: Podrías añadir aquí una validación de tiempo (ej. si el caché tiene más de 5 min)
-        return CACHE_COMERCIOS[instancia]
+async def obtener_comercio(instancia, forzar_actualizacion=False):
+    # 1. Si no forzamos, revisamos Redis primero
+    if not forzar_actualizacion:
+        comercio_cache = await obtener_cache_comercio(instancia)
+        if comercio_cache:
+            return comercio_cache
     
     try:
-        print(f"🔄 [Cache] Actualizando datos de comercio para instancia: {instancia}")
-        res = supabase.table("comercios").select("*").ilike("evolution_instance", instancia).execute()
+        print(f"🔄 [BD] Buscando comercio en Supabase para instancia: {instancia}")
+        # Hacemos la consulta asíncrona usando to_thread si la librería de Supabase es síncrona
+        res = await asyncio.to_thread(
+            lambda: supabase.table("comercios").select("*").ilike("evolution_instance", instancia).execute()
+        )
         
         if res.data:
             comercio_actualizado = res.data[0]
-            CACHE_COMERCIOS[instancia] = comercio_actualizado
+            # 2. Guardamos en Redis para la próxima vez
+            await guardar_cache_comercio(instancia, comercio_actualizado)
             return comercio_actualizado
             
     except Exception as e:
@@ -449,15 +454,9 @@ def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
         
     return None
 
+_ultimo_envio_instancia = defaultdict(float)
 async def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
-    global _ultimo_envio_timestamp, _lock_whatsapp
-    
-    # 🌟 INICIALIZACIÓN PEREZOSA DEL CANDADO ASÍNCRONO
-    # Se crea la primera vez que se llama a la función, ya dentro del Event Loop de FastAPI
-    if _lock_whatsapp is None:
-        _lock_whatsapp = asyncio.Lock()
-
-    # 1. CALCULAR DELAY DE ESCRITURA (Tu lógica genial se mantiene)
+    # 1. CALCULAR DELAY DE ESCRITURA
     delay_milisegundos = min(max(len(texto) * 30 + random.randint(800, 1500), 1200), 3500)
     
     url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
@@ -469,7 +468,7 @@ async def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensa
         "checkNumber": False,       
         "verifyNumber": False,      
         "options": {
-            "delay": delay_milisegundos, # Evolution maneja el "Escribiendo..." automáticamente con esto
+            "delay": delay_milisegundos,
             "checkNumber": False    
         }
     }
@@ -479,26 +478,24 @@ async def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensa
             "key": {"id": id_mensaje, "remoteJid": remote_jid, "fromMe": False}
         }
         
-    # 2. PROTEGER EL ENVÍO CON EL FILTRO ANTI-RÁFAGA (Versión Async)
-    async with _lock_whatsapp:
+    # 2. PROTEGER EL ENVÍO (Ahora sí, 100% por instancia)
+    async with locks_por_instancia[instance_name]:
         ahora = time.time()
-        tiempo_transcurrido = ahora - _ultimo_envio_timestamp
+        tiempo_transcurrido = ahora - _ultimo_envio_instancia[instance_name]
         
         if tiempo_transcurrido < 1.5:
             tiempo_espera = 1.5 - tiempo_transcurrido
-            print(f"⏳ [Anti-Ban] Esperando {tiempo_espera:.2f}s sin bloquear el servidor...")
-            # 🌟 MAGIA ACÁ: Esperamos, pero dejamos que el servidor atienda a otros comercios mientras tanto
+            print(f"⏳ [Anti-Ban] La instancia {instance_name} espera {tiempo_espera:.2f}s...")
             await asyncio.sleep(tiempo_espera) 
         
-        _ultimo_envio_timestamp = time.time()
+        # Actualizamos el tiempo SOLO para esta instancia
+        _ultimo_envio_instancia[instance_name] = time.time()
 
         try:
-            # Mandamos la petición al webhook de Evolution
-            # Nota: Usar asyncio.to_thread evita que requests (que es síncrono) trabe el event loop brevemente
             respuesta = await asyncio.to_thread(requests.post, url, headers=headers, json=payload)
             
             if respuesta.status_code in [200, 201]:
-                print(f"✅ Mensaje a {numero_destino} (Delay: {delay_milisegundos}ms)")
+                print(f"✅ Mensaje a {numero_destino} (Delay: {delay_milisegundos}ms) desde {instance_name}")
             else:
                 print(f"❌ Error WhatsApp: {respuesta.text}")
         except Exception as e:
@@ -554,18 +551,22 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     # 1. Filtro de seguridad inicial
     if verificar_numero_excluido(id_remitente_limpio, comercio_id):
         print(f"🤫 [Filtro Blacklist] Mensaje de {id_remitente_limpio} ignorado.")
-        buffer_mensajes.pop(id_remitente_limpio, None)
+        # Limpiamos la cola en Redis silenciosamente
+        await obtener_y_limpiar_buffer(id_remitente_limpio)
         return
 
-    if id_remitente_limpio not in buffer_mensajes or not buffer_mensajes[id_remitente_limpio]:
+    # 2. Extraemos y limpiamos la lista de mensajes DIRECTO de Redis
+    mensajes = await obtener_y_limpiar_buffer(id_remitente_limpio)
+    
+    if not mensajes:
         return
 
-    # 2. Limpieza de memoria: Quitamos el timer apenas empieza el proceso
+    # Limpieza de memoria: Quitamos el timer apenas empieza el proceso
     timers_debounce.pop(id_remitente_limpio, None)
 
     try:
-        # 3. Obtención de datos FUERZANDO actualización
-        comercio_db = obtener_comercio(instance_name, forzar_actualizacion=True)
+        # 3. Obtención de datos FUERZANDO actualización (Ahora con await)
+        comercio_db = await obtener_comercio(instance_name, forzar_actualizacion=True)
         
         if comercio_db:
             estado = str(comercio_db.get("estado_suscripcion", "trial")).lower().strip()
@@ -585,13 +586,11 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
                 print(f"🚫 [SaaS] Comercio {comercio_id} sin créditos. Bloqueando respuesta silenciosamente.")
                 
                 try:
-                    # 🌟 AGREGAMOS AWAIT a la alerta de suspensión
                     await alertar_suspension_dueno(tel_dueno, instance_name)
                 except Exception as e:
                     print(f"⚠️ No se pudo enviar la alerta de suspensión al dueño: {e}")
 
-                buffer_mensajes.pop(id_remitente_limpio, None)
-                return
+                return # Ya vaciamos el buffer de Redis arriba, solo salimos.
 
             # Realizar el descuento
             if es_trial:
@@ -599,7 +598,6 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
                 supabase.table("comercios").update({"creditos_demo": nuevo_saldo}).eq("id", comercio_id).execute()
                 print(f"✅ [SaaS] Descontado de TRIAL. Quedan: {nuevo_saldo}")
                 if nuevo_saldo in [10, 2]: 
-                    # 🌟 AGREGAMOS AWAIT
                     await alertar_consumo_dueno(tel_dueno, 90 if nuevo_saldo == 10 else 95, nuevo_saldo, instance_name)
             else:
                 nuevo_saldo = saldo_mensajes - 1
@@ -608,7 +606,6 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
                 topes = {"basico": 1000, "pro": 3500, "premium": 10000}
                 limite = topes.get(plan_actual, 1000)
                 if nuevo_saldo == int(limite * 0.20) or nuevo_saldo == int(limite * 0.05):
-                    # 🌟 AGREGAMOS AWAIT
                     await alertar_consumo_dueno(tel_dueno, 80 if nuevo_saldo > (limite * 0.1) else 95, nuevo_saldo, instance_name)
         else:
             return
@@ -616,14 +613,16 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         print(f"❌ [SaaS] Error crítico en facturación: {e}")
 
     # 4. Procesamiento del mensaje (Gemini)
-    mensajes = buffer_mensajes.pop(id_remitente_limpio)
     elementos_prompt = []
     textos_del_bloque = []
 
     for m in mensajes:
         textos_del_bloque.append(m["texto"])
-        if "audio_bytes" in m and m["audio_bytes"]:
-            parte_audio = types.Part.from_bytes(data=m["audio_bytes"], mime_type="audio/ogg")
+        
+        # 🌟 MAGIA REDIS: Decodificamos el base64 del audio si existe
+        if "audio_b64" in m and m["audio_b64"]:
+            audio_bytes_reales = base64.b64decode(m["audio_b64"])
+            parte_audio = types.Part.from_bytes(data=audio_bytes_reales, mime_type="audio/ogg")
             elementos_prompt.append(parte_audio)
 
     texto_completo = ". ".join(textos_del_bloque)
@@ -635,7 +634,7 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         sesiones_chat[session_key] = iniciar_agente(comercio_id, numero_destino)
     chat_actual = sesiones_chat[session_key]
 
-    # 5. Envío a Gemini con Captura de Errores de Cuota de Emergencia 🛡️
+    # 5. Envío a Gemini con Captura de Errores de Cuota de Emergencia
     try:
         respuesta = chat_actual.send_message(elementos_prompt)
         texto_respuesta = respuesta.text or "Aguardame un segundo que reviso el sistema..."
@@ -646,13 +645,9 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         error_str = str(e)
         print(f"[Error Procesamiento] {error_str}")
         
-        # 🚨 INTERCEPTOR CRÍTICO: Si la API de Google se quedó sin recursos (Error 429)
         if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
             print(f"⚠️ [Cuota Excedida] Enviando mensaje de contingencia a {numero_destino} por saturación de Gemini.")
-            
             msg_ocupado = "En este momento todos nuestros asesores están ocupados atendiendo a otros clientes. Por favor, aguardanos unos minutitos y volvé a escribirnos. ¡Gracias!"
-            
-            # 🌟 AGREGAMOS AWAIT también en la contingencia
             await enviar_mensaje_whatsapp(numero_destino, msg_ocupado, instance_name, ultimo_id_mensaje, remote_jid_original)
             
 # --- DETECCIÓN DE TIPOS DE MENSAJE MULTIMEDIA ---
@@ -699,21 +694,10 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
     if not instance_name:
         return {"status": "ignorado"}
 
-    comercio = obtener_comercio(instance_name)
+    comercio = await obtener_comercio(instance_name)
     if not comercio:
         return {"status": "error"}
     comercio_id = comercio["id"]
-
-    if evento_actual == "contacts.upsert":
-        try:
-            contactos_data = datos.get("data", [])
-            if isinstance(contactos_data, dict): contactos_data = [contactos_data]
-            for c in contactos_data:
-                if c.get("id", "").endswith("@s.whatsapp.net") and c.get("lid", "").endswith("@lid"):
-                    guardar_contacto(c.get("lid"), c.get("id"), c.get("pushName", ""), comercio_id)
-        except Exception:
-            pass
-        return {"status": "ok"}
 
     if evento_actual not in ["messages.upsert", "messages.update"]:
         return {"status": "ok"}
@@ -743,9 +727,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 numero_destino = sender
             elif participant and participant.endswith("@s.whatsapp.net"):
                 numero_destino = participant
-            else:
-                numero_guardado = obtener_numero_real(remote_jid, comercio_id, push_name, instance_name)
-                if numero_guardado: numero_destino = numero_guardado
 
         id_remitente_limpio = numero_destino.split("@")[0]
 
@@ -769,8 +750,8 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
         id_mensaje = key.get("id", "")
 
-        if id_mensaje in mensajes_procesados: return {"status": "ignorado"}
-        mensajes_procesados.add(id_mensaje)
+        if await es_mensaje_procesado(id_mensaje):
+            return {"status": "ignorado"}
 
         if es_troll(id_remitente_limpio):
             print(f"🚷 [Anti-Troll] Bloqueando ráfaga de mensajes de {id_remitente_limpio}")
@@ -791,7 +772,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
                 if ahora - ultimo_ts > 300: 
                     ultimo_aviso_audio[id_remitente_limpio] = ahora
                     msg_escribime = "Hola, no puedo escuchar audios, por favor escribime tu consulta así te puedo ayudar"
-                    enviar_mensaje_whatsapp(numero_destino, msg_escribime, instance_name, id_mensaje, key.get("remoteJid"))
+                    await enviar_mensaje_whatsapp(numero_destino, msg_escribime, instance_name, id_mensaje, key.get("remoteJid"))
                     return {"status": "audio_denegado_plan_basico"}
                 
                 print(f"🔇 [Anti-Spam Audio] Audio de {id_remitente_limpio} ignorado silenciosamente.")
@@ -799,27 +780,26 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
             
             permite_audio = comercio.get("permitir_audios", False)
             if not permite_audio:
-                enviar_mensaje_whatsapp(numero_destino, "Disculpa, por el momento solo puedo leer textos, por favor escribime tu consulta", instance_name, id_mensaje, key.get("remoteJid"))
+                await enviar_mensaje_whatsapp(numero_destino, "Disculpa, por el momento solo puedo leer textos, por favor escribime tu consulta", instance_name, id_mensaje, key.get("remoteJid"))
                 return {"status": "audio_rechazado"}
             
             audio_bytes = descargar_audio_evolution(instance_name, mensaje_data)
             if not audio_bytes:
-                enviar_mensaje_whatsapp(numero_destino, "Tuve un problema al escuchar tu audío, me la podés escribir por texto por favor", instance_name, id_mensaje, key.get("remoteJid"))
+                await enviar_mensaje_whatsapp(numero_destino, "Tuve un problema al escuchar tu audío, me la podés escribir por texto por favor", instance_name, id_mensaje, key.get("remoteJid"))
                 return {"status": "error_descarga_audio"}
 
-            if id_remitente_limpio not in buffer_mensajes:
-                buffer_mensajes[id_remitente_limpio] = []
+            # 🌟 REDIS: Codificamos a texto seguro para JSON
+            audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
             
-            buffer_mensajes[id_remitente_limpio].append({
+            await agregar_al_buffer(id_remitente_limpio, {
                 "texto": "[El usuario envió una nota de voz/audio]",
-                "audio_bytes": audio_bytes,
+                "audio_b64": audio_b64,
                 "id_mensaje": id_mensaje
             })
 
             if id_remitente_limpio in timers_debounce and not timers_debounce[id_remitente_limpio].done():
                 timers_debounce[id_remitente_limpio].cancel()
 
-            # 🚀 CAMBIO: MANDAMOS A LA COLA EN LUGAR DE PROCESAR DIRECTO
             async def timer_task_audio():
                 await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
                 await cola_mensajes.put((id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid))
@@ -829,13 +809,8 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
         if not texto_usuario: return {"status": "ignorado"}
 
-        if remote_jid.endswith("@lid") and numero_destino.endswith("@s.whatsapp.net"):
-            guardar_contacto(remote_jid, numero_destino, push_name, comercio_id)
-
-        if id_remitente_limpio not in buffer_mensajes:
-            buffer_mensajes[id_remitente_limpio] = []
-        
-        buffer_mensajes[id_remitente_limpio].append({
+        # 🌟 REDIS: Guardamos el texto directo al buffer
+        await agregar_al_buffer(id_remitente_limpio, {
             "texto": texto_usuario,
             "id_mensaje": id_mensaje
         })
@@ -843,7 +818,6 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
         if id_remitente_limpio in timers_debounce and not timers_debounce[id_remitente_limpio].done():
             timers_debounce[id_remitente_limpio].cancel()
 
-        # 🚀 CAMBIO: MANDAMOS A LA COLA EN LUGAR DE PROCESAR DIRECTO
         async def timer_task():
             await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
             await cola_mensajes.put((id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid))
@@ -909,8 +883,6 @@ async def crear_preferencia(request: Request):
         print(f"❌ Error creando preferencia de MP: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Memoria a corto plazo para atajar ráfagas de Mercado Pago en el mismo segundo
-pagos_procesados_cache = set()
 
 @app.post("/webhook/mercadopago")
 async def webhook_mercadopago(request: Request):
@@ -920,9 +892,9 @@ async def webhook_mercadopago(request: Request):
         if params.get("type") == "payment":
             payment_id = str(params.get("data.id"))
             
-            # 1. BARRERA EN MEMORIA: Evita ráfagas instantáneas
-            if payment_id in pagos_procesados_cache:
-                print(f"🛡️ [MercadoPago] Webhook duplicado atajado en caché: {payment_id}")
+            # 1. BARRERA REDIS: Evita ráfagas y sobrevive a reinicios del servidor
+            if await es_pago_procesado(payment_id):
+                print(f"🛡️ [MercadoPago] Webhook duplicado atajado en Redis: {payment_id}")
                 return {"status": "ignored", "message": "Pago ya procesado recientemente"}
             
             payment_info = mp.payment().get(payment_id)
@@ -962,8 +934,7 @@ async def webhook_mercadopago(request: Request):
                     "ultimo_pago_id": payment_id  # 🔒 Este es tu nuevo candado
                 }).eq("id", int(comercio_id)).execute()
                 
-                # Agregamos a la memoria para atajar futuros rebotes rápidos
-                pagos_procesados_cache.add(payment_id)
+                # Eliminada la vieja línea de pagos_procesados_cache.add(payment_id)
                 
                 print(f"✅ Comercio {comercio_id} actualizado a {tipo_plan.upper()} con {mensajes_a_cargar} mensajes.")
                 return {"status": "success", "message": "Comercio activado y saldo recargado"}
