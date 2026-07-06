@@ -1040,8 +1040,7 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
                 texto_campana = f"¡Hola {primer_nombre}! Gracias por tu compra de {equipos_string} con nosotros. ¡Estamos a tu disposición!"
 
         # 4. 🌟 CAMBIO CLAVE: Calculamos la fecha y HORA EXACTA del disparo
-        fecha_disparo_dt = datetime.now(timezone.utc) + timedelta(days=dias_delay)
-        
+        fecha_disparo_dt = datetime.now(timezone.utc) + timedelta(minutes=1)        
         payload_postventa = {
             "comercio_id": comercio_id,
             "cliente_nombre": cliente_nombre,
