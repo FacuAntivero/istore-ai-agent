@@ -146,18 +146,31 @@ async def test_recordatorio(turno_id: int):
 def programar_evento_futuro(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
     """
     Se comunica con Upstash QStash para agendar un webhook en el futuro.
-    Leyendo las credenciales de forma segura desde las variables de entorno.
+    Apuntando correctamente a la región de USA configurada.
     """
-    # 🌟 Leemos las variables del archivo .env de forma segura
+    # 🌟 Leemos las variables de entorno de forma segura
     QSTASH_TOKEN = os.getenv("QSTASH_TOKEN")
     URL_RAILWAY = os.getenv("URL_RAILWAY")
+    
+    # Intentamos leer QSTASH_URL desde Railway. Si no existe, usamos la de USA como fallback seguro.
+    # Ojo: Aseguramos que termine en /v2/publish
+    base_qstash_url = os.getenv("QSTASH_URL", "https://qstash-us-east-1.upstash.io/v2/publish")
+    if not base_qstash_url.endswith("/v2/publish"):
+        base_qstash_url = f"{base_qstash_url.rstrip('/')}/v2/publish"
     
     # Validación de seguridad por si te olvidás de configurarlas
     if not QSTASH_TOKEN or not URL_RAILWAY:
         print("❌ [QStash] Error crítico: QSTASH_TOKEN o URL_RAILWAY no están configurados en el entorno.")
         return
+
+    # Limpiamos URL_RAILWAY para asegurar que no tenga barras duplicadas al final
+    url_base_servidor = URL_RAILWAY.rstrip("/")
     
-    url_qstash = f"https://qstash.upstash.io/v2/publish/{URL_RAILWAY}/api/webhooks/disparar-mensaje-programado"
+    # El webhook de tu servidor al que Upstash le tiene que pegar en el futuro
+    url_mi_webhook = f"{url_base_servidor}/api/webhooks/disparar-mensaje-programado"
+    
+    # URL FINAL: Formato oficial de QStash -> https://qstash-us-east-1.upstash.io/v2/publish/https://tu-server.com/api/...
+    url_qstash_final = f"{base_qstash_url}/{url_mi_webhook}"
     
     # Calculamos cuántos segundos faltan desde AHORA hasta la fecha de disparo
     ahora_utc = datetime.now(timezone.utc)
@@ -183,13 +196,14 @@ def programar_evento_futuro(tipo_evento: str, registro_id: int, fecha_disparo: d
     }
     
     try:
-        res = requests.post(url_qstash, headers=headers, json=payload)
-        if res.status_code == 201:
-            print(f"✅ [QStash] Evento programado: {tipo_evento} ID {registro_id} en {delay_segundos} segundos.")
+        res = requests.post(url_qstash_final, headers=headers, json=payload)
+        # QStash responde con 201 Created cuando agenda exitosamente
+        if res.status_code in [200, 201]:
+            print(f"✅ [QStash] Evento programado con éxito: {tipo_evento} ID {registro_id} en {delay_segundos} segundos (USA Region).")
         else:
-            print(f"❌ [QStash] Error al programar: {res.text}")
+            print(f"❌ [QStash] Error al programar en {url_qstash_final}: [{res.status_code}] {res.text}")
     except Exception as e:
-        print(f"❌ [QStash] Error de red: {e}")
+        print(f"❌ [QStash] Error de red al conectar con Upstash: {e}")
 
 # 3. EL RECEPTOR DEL WEBHOOK (El que ejecuta el disparo final)
 @app.post("/api/webhooks/disparar-mensaje-programado")
