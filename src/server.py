@@ -215,7 +215,7 @@ async def webhook_disparar_mensaje_programado(data: PayloadWebhookMensaje, backg
     return {"status": "accepted"}
 
 # 4. EL EJECUTOR (Lee la DB por ID y despacha)
-def procesar_envio_inmediato(tipo: str, registro_id: int):
+async def procesar_envio_inmediato(tipo: str, registro_id: int):
     try:
         if tipo == "cita":
             # 1. ATÓMICO: Marcamos como 'procesando' solo si estaba 'pendiente'
@@ -244,7 +244,8 @@ def procesar_envio_inmediato(tipo: str, registro_id: int):
             hora_formateada = fecha_obj.strftime("%H:%M")
             mensaje = f"¡Hola {turno.get('cliente_nombre', 'Cliente')}! 👋\n\nTe recordamos tu cita a las *{hora_formateada} hs*.\n\n¡Te esperamos!"
             
-            enviar_mensaje_whatsapp(turno["telefono"], mensaje, instance_name)
+            # ✅ CORRECCIÓN 2: Agregamos "await" para apretar el gatillo
+            await enviar_mensaje_whatsapp(turno["telefono"], mensaje, instance_name)
             
             # 4. Finalización atómica
             supabase.table("turnos_clientes")\
@@ -272,11 +273,12 @@ def procesar_envio_inmediato(tipo: str, registro_id: int):
             # 2. Lógica de envío
             texto_ws = msg.get("mensaje_texto") or f"¡Hola {msg.get('cliente_nombre', '')}! Gracias por tu compra de {msg.get('equipos_detalle', 'equipo')}. ¡Estamos a tu disposición!"
                 
-            enviar_mensaje_whatsapp(msg["telefono"], texto_ws, instance_name)
+            # ✅ CORRECCIÓN 3: Agregamos "await" acá también
+            await enviar_mensaje_whatsapp(msg["telefono"], texto_ws, instance_name)
             
             # 3. Finalización
             supabase.table("cola_mensajes_postventa").update({"estado": "enviado"}).eq("id", registro_id).execute()
-            print(f"✅ Post-Venta enviada: {msg.get('cliente_nombre')}")
+            print(f"✅ Post-Venta enviada real por WhatsApp a: {msg.get('cliente_nombre')}")
 
     except Exception as e:
         print(f"❌ [Ejecutor] Error crítico en ID {registro_id}: {e}")
