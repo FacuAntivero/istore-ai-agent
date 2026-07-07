@@ -638,18 +638,21 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     session_key = f"{comercio_id}_{id_remitente_limpio}"
     if session_key not in sesiones_chat:
         try:
-            # Consultamos los últimos 20 mensajes de este cliente en Supabase (en un hilo para no bloquear descargas)
+            # 1. Traemos los últimos 20 mensajes (del más nuevo al más viejo usando desc=True)
             res_historial = await asyncio.to_thread(
                 lambda: supabase.table("historial_chat_ia")
                 .select("rol", "contenido")
                 .eq("telefono_cliente", id_remitente_limpio)
-                .order("created_at", descending=False)
+                .order("created_at", desc=True)  # ✅ CORREGIDO: Usamos 'desc=True' en lugar de descending
                 .limit(20)
                 .execute()
             )
+            
             historial_previo = res_historial.data if res_historial.data else []
-        except Exception as e:
-            print(f"⚠️ [Supabase Error] No se pudo recuperar el historial para {id_remitente_limpio}: {e}")
+            historial_previo.reverse()  # ✅ Ordena de más viejo a más nuevo
+            
+        except Exception as err_historial:
+            print(f"⚠️ [Supabase Error] No se pudo recuperar el historial para {id_remitente_limpio}: {err_historial}")
             historial_previo = []
             
         # Inicializamos el agente pasándole la lista de diccionarios cruda de la BD
