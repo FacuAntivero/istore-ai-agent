@@ -1,4 +1,11 @@
 venv/
-.env
 __pycache__/
-*.pycevolution.env
+*.pyc
+
+# Archivos con credenciales — nunca deben subirse al repo.
+.env
+.env.*
+!.env.example
+evolution.env
+*.env
+qr_whatsapp.png

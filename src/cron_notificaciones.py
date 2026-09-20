@@ -1,26 +1,15 @@
-import os
 import requests
 from datetime import datetime
-from supabase import create_client
-from dotenv import load_dotenv
-
-# Cargar variables de entorno
-load_dotenv()
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "https://evolution-api-production-4b88.up.railway.app")
-API_KEY = os.getenv("EVOLUTION_API_KEY", "74BD7CFB-C38A-4143-833A-FCEA92FBBA21")
+import config
+from database import supabase
 
 def enviar_whatsapp(numero, texto, instance_name):
     """Envía un mensaje usando la API de Evolution."""
     if not numero.endswith("@s.whatsapp.net"):
         numero = f"{numero}@s.whatsapp.net"
-        
-    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
-    headers = {"apikey": API_KEY, "Content-Type": "application/json"}
+
+    url = f"{config.EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
+    headers = {"apikey": config.EVOLUTION_API_KEY, "Content-Type": "application/json"}
     payload = {"number": numero, "text": texto, "checkNumber": False}
     
     try:

@@ -19,14 +19,13 @@ from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from google.genai import errors, types
-from supabase import create_client
-from dotenv import load_dotenv
 from pydantic import BaseModel
+import config
+from database import supabase
 from agent import iniciar_agente
 
 # 🧠 Imports para los recordatorios automáticos
 from contextlib import asynccontextmanager
-load_dotenv()
 
 # --- PLANIFICADOR DE NOTIFICACIONES INTEGRADO (POST-VENTA) ---
 from cron_notificaciones import procesar_postventa
@@ -149,19 +148,13 @@ def programar_evento_futuro(tipo_evento: str, registro_id: int, fecha_disparo: d
     Apuntando correctamente a la región de USA configurada.
     """
     # 🌟 Leemos las variables de entorno de forma segura
-    QSTASH_TOKEN = os.getenv("QSTASH_TOKEN")
-    URL_RAILWAY = os.getenv("URL_RAILWAY")
-    
-    # Intentamos leer QSTASH_URL desde Railway. Si no existe, usamos la de USA como fallback seguro.
-    # Ojo: Aseguramos que termine en /v2/publish
-    base_qstash_url = os.getenv("QSTASH_URL", "https://qstash-us-east-1.upstash.io/v2/publish")
+    QSTASH_TOKEN = config.QSTASH_TOKEN
+    URL_RAILWAY = config.URL_RAILWAY
+
+    # Aseguramos que la URL de QStash termine en /v2/publish
+    base_qstash_url = config.QSTASH_URL
     if not base_qstash_url.endswith("/v2/publish"):
         base_qstash_url = f"{base_qstash_url.rstrip('/')}/v2/publish"
-    
-    # Validación de seguridad por si te olvidás de configurarlas
-    if not QSTASH_TOKEN or not URL_RAILWAY:
-        print("❌ [QStash] Error crítico: QSTASH_TOKEN o URL_RAILWAY no están configurados en el entorno.")
-        return
 
     # Limpiamos URL_RAILWAY para asegurar que no tenga barras duplicadas al final
     url_base_servidor = URL_RAILWAY.rstrip("/")
@@ -380,11 +373,11 @@ async def eliminar_plantilla(plantilla_id: int):
         raise HTTPException(status_code=500, detail=str(e))
     
 # --- INICIALIZACIÓN MERCADOPAGO ---
-mp_access_token = os.getenv("MERCADOPAGO_ACCESS_TOKEN")
+mp_access_token = config.MERCADOPAGO_ACCESS_TOKEN
 if mp_access_token:
     mp = mercadopago.SDK(mp_access_token)
 else:
-    print("⚠️ ADVERTENCIA: No se encontró MERCADOPAGO_ACCESS_TOKEN en el .env")
+    print("⚠️ ADVERTENCIA: No se encontró MERCADOPAGO_ACCESS_TOKEN en el entorno — checkout deshabilitado.")
 
 sesiones_chat = {}
 
@@ -393,12 +386,10 @@ timers_debounce = {}
 rate_limiter = {} # Guarda: { "numero_remitente": [timestamp1, timestamp2...] }
 ultimo_aviso_audio = {} # Anti-Spam: Guarda { "id_remitente": timestamp_ultimo_aviso }
 
-TIEMPO_ESPERA_MENSAJE = float(os.getenv("DEBOUNCE_SECONDS", 60))
+TIEMPO_ESPERA_MENSAJE = config.DEBOUNCE_SECONDS
 
-EVOLUTION_API_URL = "https://evolution-api-production-4b88.up.railway.app"
-API_KEY = "74BD7CFB-C38A-4143-833A-FCEA92FBBA21"
-
-supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+EVOLUTION_API_URL = config.EVOLUTION_API_URL
+API_KEY = config.EVOLUTION_API_KEY
 
 
 async def obtener_comercio(instancia, forzar_actualizacion=False):
@@ -426,15 +417,15 @@ async def obtener_comercio(instancia, forzar_actualizacion=False):
     
     return None
 
-MI_NUMERO = os.getenv("MI_NUMERO", "5492494600615@s.whatsapp.net")
+MI_NUMERO = config.MI_NUMERO
 
 def descargar_audio_evolution(instance_name: str, mensaje_data: dict) -> bytes:
     """
     Pide a Evolution API que descifre el mensaje multimedia y devuelve los bytes reales del audio.
     """
-    url = f"https://evolution-api-production-4b88.up.railway.app/chat/getBase64FromMediaMessage/{instance_name}"
+    url = f"{EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/{instance_name}"
     headers = {
-        "apikey": API_KEY,  # Mantenemos tu variable sin comillas
+        "apikey": API_KEY,
         "Content-Type": "application/json"
     }
     payload = {"message": mensaje_data}
@@ -905,9 +896,9 @@ async def crear_preferencia(request: Request):
             ],
             "external_reference": f"{comercio_id}|{tipo_plan}",
             "back_urls": {
-                "success": "https://istore-ai-agent-production.up.railway.app/?pago=exitoso",
-                "failure": "https://istore-ai-agent-production.up.railway.app/?pago=fallido",
-                "pending": "https://istore-ai-agent-production.up.railway.app/?pago=pendiente"
+                "success": f"{config.URL_RAILWAY.rstrip('/')}/?pago=exitoso",
+                "failure": f"{config.URL_RAILWAY.rstrip('/')}/?pago=fallido",
+                "pending": f"{config.URL_RAILWAY.rstrip('/')}/?pago=pendiente"
             },
             "auto_return": "approved"
         }

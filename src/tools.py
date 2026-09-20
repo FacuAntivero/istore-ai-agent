@@ -1,8 +1,8 @@
 import dateparser
-import os
 import requests
 import json
 from datetime import datetime, timedelta, timezone
+import config
 from database import supabase
 
 def consultar_inventario(modelo_corregido: str, comercio_id: int, telefono_cliente: str) -> str:
@@ -202,14 +202,10 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
 def _programar_upstash_desde_tools(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
     """Función auxiliar para agendar el recordatorio en QStash desde las tools del bot."""
     from zoneinfo import ZoneInfo
-    
-    QSTASH_TOKEN = os.getenv("QSTASH_TOKEN")
-    URL_RAILWAY = os.getenv("URL_RAILWAY")
-    
-    if not QSTASH_TOKEN or not URL_RAILWAY:
-        print("❌ [QStash Tool] Error crítico: QSTASH_TOKEN o URL_RAILWAY no configurados en el entorno.")
-        return
-    
+
+    QSTASH_TOKEN = config.QSTASH_TOKEN
+    URL_RAILWAY = config.URL_RAILWAY
+
     url_base_limpia = URL_RAILWAY.strip("/")
     url_qstash = f"https://qstash.upstash.io/v2/publish/{url_base_limpia}/api/webhooks/disparar-mensaje-programado"
     
@@ -338,12 +334,9 @@ def solicitar_asistencia_humana(motivo: str, telefono_cliente: str, comercio_id:
             f"📌 *Motivo:* {motivo}"
         )
 
-        EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "https://evolution-api-production-4b88.up.railway.app")
-        API_KEY = os.getenv("EVOLUTION_API_KEY", "74BD7CFB-C38A-4143-833A-FCEA92FBBA21")
-        
-        url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
+        url = f"{config.EVOLUTION_API_URL}/message/sendText/{instance_name}?checkNumber=false"
         headers = {
-            "apikey": API_KEY,
+            "apikey": config.EVOLUTION_API_KEY,
             "Content-Type": "application/json"
         }
         payload = {

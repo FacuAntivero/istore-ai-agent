@@ -1,9 +1,10 @@
 import requests
 import time
+import config
 
-# ACORDATE DE PONER TU ENLACE NUEVO ACÁ ABAJO
-BASE_URL = "https://evolution-api-production-4b88.up.railway.app" 
-API_KEY = "74BD7CFB-C38A-4143-833A-FCEA92FBBA21"
+BASE_URL = config.EVOLUTION_API_URL
+API_KEY = config.EVOLUTION_API_KEY
+# ACORDATE DE PONER EL NOMBRE DE INSTANCIA QUE VAS A CREAR ACÁ ABAJO
 INSTANCE_NAME = "istoreBot10"
 NUMERO = "5492494600615"
 WEBHOOK_URL = "https://web-production-cadf4.up.railway.app/webhook"

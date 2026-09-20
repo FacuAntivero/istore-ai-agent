@@ -1,23 +1,16 @@
-import os
 import json
 import redis.asyncio as redis
-from dotenv import load_dotenv
-# Importamos el cliente oficial de Supabase
-from supabase import create_client, Client
-
-load_dotenv()
+import config
+# Reusamos el mismo cliente de Supabase que el resto de la app (database.py)
+# en vez de abrir una conexión nueva acá — un solo pool de conexiones por proceso.
+from database import supabase as supabase_client
 
 # ==========================================
-# 🔌 INICIALIZACIÓN DE CONEXIONES (Redis & Supabase)
+# 🔌 INICIALIZACIÓN DE CONEXIONES (Redis)
 # ==========================================
 
 # Conexión a Upstash Redis (Para buffer, anti-duplicados y caché)
-redis_db = redis.from_url(os.getenv("UPSTASH_REDIS_URL"), decode_responses=True)
-
-# Conexión a Supabase (Para memoria a largo plazo e historial persistente)
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+redis_db = redis.from_url(config.UPSTASH_REDIS_URL, decode_responses=True)
 
 
 # ==========================================
@@ -36,7 +29,9 @@ async def es_pago_procesado(payment_id: str) -> bool:
     """Misma lógica que los mensajes, pero para los webhooks de MercadoPago."""
     fue_creado = await redis_db.setnx(f"pago_procesado:{payment_id}", "1")
     if fue_creado:
-        await redis_db.expire(f"pago_processed:{payment_id}", 86400)
+        # Antes decía "pago_processed" (inglés) acá, una clave que nunca se creó,
+        # así que expire() no hacía nada y estas claves quedaban para siempre en Redis.
+        await redis_db.expire(f"pago_procesado:{payment_id}", 86400)
         return False
     return True
 

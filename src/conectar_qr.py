@@ -2,15 +2,16 @@ import requests
 import time
 import base64
 import os
+import config
 
-# 1. URL de la API (Correcta)
-BASE_URL = "https://evolution-api-production-4b88.up.railway.app"
+# 1. URL de la API
+BASE_URL = config.EVOLUTION_API_URL
 
 # 2. Tu API Key
-API_KEY = "74BD7CFB-C38A-4143-833A-FCEA92FBBA21"
+API_KEY = config.EVOLUTION_API_KEY
 
 # 3. ¡NUEVO NOMBRE PARA ROMPER EL CACHÉ ZOMBI!
-INSTANCE_NAME = "istoreBot13" 
+INSTANCE_NAME = "istoreBot13"
 
 # 4. URL del webhook (Corregida a la que aparecía en tus logs, confirmala)
 WEBHOOK_URL = "https://istore-ai-agent-production.up.railway.app/webhook"

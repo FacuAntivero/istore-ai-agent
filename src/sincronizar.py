@@ -1,20 +1,13 @@
-import os
 import requests
-from supabase import create_client
-from dotenv import load_dotenv
 import json  # Importamos para poder formatear la inspección
+import config
+from database import supabase
 
-load_dotenv()
-
-# Configuración (Tus credenciales actualizadas de Railway)
-EVOLUTION_URL = "https://evolution-api-production-4b88.up.railway.app" 
+# Configuración
+EVOLUTION_URL = config.EVOLUTION_API_URL
+API_KEY = config.EVOLUTION_API_KEY
+# ACORDATE DE PONER EL NOMBRE DE INSTANCIA QUE QUERÉS SINCRONIZAR ACÁ ABAJO
 INSTANCE_NAME = "istoreBot11"
-API_KEY = "74BD7CFB-C38A-4143-833A-FCEA92FBBA21"
-
-# Credenciales de Supabase 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 headers = {
     "apiKey": API_KEY,
