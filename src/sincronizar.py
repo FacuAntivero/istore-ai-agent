@@ -1,3 +1,4 @@
+import sys
 import requests
 import json  # Importamos para poder formatear la inspección
 import config
@@ -6,8 +7,20 @@ from database import supabase
 # Configuración
 EVOLUTION_URL = config.EVOLUTION_API_URL
 API_KEY = config.EVOLUTION_API_KEY
-# ACORDATE DE PONER EL NOMBRE DE INSTANCIA QUE QUERÉS SINCRONIZAR ACÁ ABAJO
-INSTANCE_NAME = "istoreBot11"
+
+# Antes estos dos valores estaban hardcodeados (INSTANCE_NAME = "istoreBot11" y
+# comercio_id 1 fijo más abajo). En un sistema multi-tenant eso significa que
+# correr este script para sincronizar los contactos de OTRO comercio los
+# hubiera guardado igual como si fueran del comercio 1. Ahora son argumentos
+# obligatorios para que sea imposible correrlo "por las dudas" sin pensarlo.
+if len(sys.argv) != 3:
+    sys.exit(
+        "Uso: python sincronizar.py <INSTANCE_NAME> <COMERCIO_ID>\n"
+        "Ejemplo: python sincronizar.py istoreBot11 3"
+    )
+
+INSTANCE_NAME = sys.argv[1]
+COMERCIO_ID = int(sys.argv[2])
 
 headers = {
     "apiKey": API_KEY,
@@ -54,7 +67,7 @@ try:
                 "lid": lid,
                 "numero": id_jid,
                 "nombre": name,
-                "comercio_id": 1
+                "comercio_id": COMERCIO_ID
             }).execute()
             count += 1
 

@@ -14,8 +14,8 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from tools import verificar_numero_excluido  
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from tools import verificar_numero_excluido
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from google.genai import errors, types
@@ -23,6 +23,7 @@ from pydantic import BaseModel
 import config
 from database import supabase
 from agent import iniciar_agente
+import auth
 
 # 🧠 Imports para los recordatorios automáticos
 from contextlib import asynccontextmanager
@@ -99,49 +100,56 @@ locks_por_instancia = defaultdict(asyncio.Lock)
 _ultimo_envio_timestamp = 0.0
 
 @app.get("/api/numeros-excluidos/{comercio_id}")
-async def get_numeros_excluidos(comercio_id: int):
+async def get_numeros_excluidos(comercio_id: int, authorization: str = Header(None)):
     try:
-        # Hacemos la consulta y retornamos explícitamente .data
-        res = supabase.table("numeros_excluidos").select("*").eq("comercio_id", comercio_id).execute()
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_comercio(comercio_id, user_id)
+        res = await asyncio.to_thread(
+            lambda: supabase.table("numeros_excluidos").select("*").eq("comercio_id", comercio_id).execute()
+        )
         return res.data
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error en GET numeros-excluidos: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/numeros-excluidos")
-async def add_numero_excluido(payload: NumeroExcluidoInput):
+async def add_numero_excluido(payload: NumeroExcluidoInput, authorization: str = Header(None)):
     try:
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_comercio(payload.comercio_id, user_id)
         # Armamos el diccionario manualmente para evitar conflictos de versiones en Pydantic
         data_insert = {
             "comercio_id": payload.comercio_id,
             "telefono": payload.telefono,
             "descripcion": payload.descripcion
         }
-        res = supabase.table("numeros_excluidos").insert(data_insert).execute()
+        res = await asyncio.to_thread(
+            lambda: supabase.table("numeros_excluidos").insert(data_insert).execute()
+        )
         return res.data
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error en POST numeros-excluidos: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/numeros-excluidos/{id_numero}")
-async def delete_numero_excluido(id_numero: int):
+async def delete_numero_excluido(id_numero: int, authorization: str = Header(None)):
     try:
-        res = supabase.table("numeros_excluidos").delete().eq("id", id_numero).execute()
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_registro("numeros_excluidos", id_numero, user_id)
+        await asyncio.to_thread(
+            lambda: supabase.table("numeros_excluidos").delete().eq("id", id_numero).execute()
+        )
         return {"status": "success"}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error en DELETE numeros-excluidos: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/test-recordatorio/{turno_id}")
-async def test_recordatorio(turno_id: int):
-    print(f"🧪 Iniciando prueba de recordatorio para ID: {turno_id}")
-    try:
-        # Forzamos la ejecución de la función de envío directamente
-        procesar_envio_inmediato("cita", turno_id)
-        return {"status": "disparo_ejecutado"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-    
 def programar_evento_futuro(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
     """
     Se comunica con Upstash QStash para agendar un webhook en el futuro.
@@ -212,65 +220,77 @@ async def procesar_envio_inmediato(tipo: str, registro_id: int):
     try:
         if tipo == "cita":
             # 1. ATÓMICO: Marcamos como 'procesando' solo si estaba 'pendiente'
-            lock = supabase.table("turnos_clientes")\
-                .update({"estado": "procesando"})\
-                .eq("id", registro_id)\
-                .eq("estado", "pendiente")\
-                .eq("recordatorio_enviado", False)\
+            lock = await asyncio.to_thread(
+                lambda: supabase.table("turnos_clientes")
+                .update({"estado": "procesando"})
+                .eq("id", registro_id)
+                .eq("estado", "pendiente")
+                .eq("recordatorio_enviado", False)
                 .execute()
-            
+            )
+
             if not lock.data:
                 print(f"⚠️ [Ejecutor] Cita ID {registro_id} ignorada: ya fue procesada por otro hilo.")
                 return
-            
+
             # 2. Obtenemos el registro bloqueado
-            res = supabase.table("turnos_clientes")\
-                .select("*, comercio:comercio_id(evolution_instance)")\
-                .eq("id", registro_id)\
+            res = await asyncio.to_thread(
+                lambda: supabase.table("turnos_clientes")
+                .select("*, comercio:comercio_id(evolution_instance)")
+                .eq("id", registro_id)
                 .execute()
-            
+            )
+
             turno = res.data[0]
             instance_name = turno.get("comercio", {}).get("evolution_instance")
-            
+
             # 3. Procesamiento
             fecha_obj = datetime.fromisoformat(turno["fecha_turno"].replace("Z", ""))
             hora_formateada = fecha_obj.strftime("%H:%M")
             mensaje = f"¡Hola {turno.get('cliente_nombre', 'Cliente')}! 👋\n\nTe recordamos tu cita a las *{hora_formateada} hs*.\n\n¡Te esperamos!"
-            
+
             # ✅ CORRECCIÓN 2: Agregamos "await" para apretar el gatillo
             await enviar_mensaje_whatsapp(turno["telefono"], mensaje, instance_name)
-            
+
             # 4. Finalización atómica
-            supabase.table("turnos_clientes")\
-                .update({"recordatorio_enviado": True, "estado": "completado"})\
-                .eq("id", registro_id)\
+            await asyncio.to_thread(
+                lambda: supabase.table("turnos_clientes")
+                .update({"recordatorio_enviado": True, "estado": "completado"})
+                .eq("id", registro_id)
                 .execute()
+            )
             print(f"✅ Recordatorio enviado: {turno.get('cliente_nombre')}")
 
         elif tipo == "postventa":
             # 1. ATÓMICO: Lock para postventa
-            lock = supabase.table("cola_mensajes_postventa")\
-                .update({"estado": "procesando"})\
-                .eq("id", registro_id)\
-                .eq("estado", "pendiente")\
+            lock = await asyncio.to_thread(
+                lambda: supabase.table("cola_mensajes_postventa")
+                .update({"estado": "procesando"})
+                .eq("id", registro_id)
+                .eq("estado", "pendiente")
                 .execute()
-            
+            )
+
             if not lock.data:
                 print(f"⚠️ [Ejecutor] Postventa ID {registro_id} ignorada: ya fue procesada.")
                 return
-            
-            res = supabase.table("cola_mensajes_postventa").select("*, comercio:comercio_id(evolution_instance)").eq("id", registro_id).execute()
+
+            res = await asyncio.to_thread(
+                lambda: supabase.table("cola_mensajes_postventa").select("*, comercio:comercio_id(evolution_instance)").eq("id", registro_id).execute()
+            )
             msg = res.data[0]
             instance_name = msg.get("comercio", {}).get("evolution_instance")
-            
+
             # 2. Lógica de envío
             texto_ws = msg.get("mensaje_texto") or f"¡Hola {msg.get('cliente_nombre', '')}! Gracias por tu compra de {msg.get('equipos_detalle', 'equipo')}. ¡Estamos a tu disposición!"
-                
+
             # ✅ CORRECCIÓN 3: Agregamos "await" acá también
             await enviar_mensaje_whatsapp(msg["telefono"], texto_ws, instance_name)
-            
+
             # 3. Finalización
-            supabase.table("cola_mensajes_postventa").update({"estado": "enviado"}).eq("id", registro_id).execute()
+            await asyncio.to_thread(
+                lambda: supabase.table("cola_mensajes_postventa").update({"estado": "enviado"}).eq("id", registro_id).execute()
+            )
             print(f"✅ Post-Venta enviada real por WhatsApp a: {msg.get('cliente_nombre')}")
 
     except Exception as e:
@@ -287,14 +307,18 @@ class PlantillaPostVentaInput(BaseModel):
     texto: str
 
 @app.get("/api/plantillas/{comercio_id}")
-async def obtener_plantillas(comercio_id: int):
+async def obtener_plantillas(comercio_id: int, authorization: str = Header(None)):
     """Trae las plantillas de un comercio. Si no tiene ninguna, le siembra las 3 por defecto."""
     try:
-        res = supabase.table("plantillas_postventa") \
-            .select("*") \
-            .eq("comercio_id", comercio_id) \
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_comercio(comercio_id, user_id)
+        res = await asyncio.to_thread(
+            lambda: supabase.table("plantillas_postventa")
+            .select("*")
+            .eq("comercio_id", comercio_id)
             .execute()
-        
+        )
+
         # 🌟 MAGIA: Si la lista está vacía, creamos los 3 ejemplos por defecto
         if not res.data:
             plantillas_defecto = [
@@ -318,57 +342,79 @@ async def obtener_plantillas(comercio_id: int):
                 }
             ]
             # Las insertamos en la base de datos para que ya queden guardadas
-            res_insert = supabase.table("plantillas_postventa").insert(plantillas_defecto).execute()
+            res_insert = await asyncio.to_thread(
+                lambda: supabase.table("plantillas_postventa").insert(plantillas_defecto).execute()
+            )
             return sorted(res_insert.data, key=lambda x: x.get('created_at', ''))
 
         # Si ya tenía plantillas (propias o las por defecto modificadas), las devolvemos
         return sorted(res.data, key=lambda x: x.get('created_at', ''))
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ ERROR EN GET PLANTILLAS: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-    
+
 @app.put("/api/plantillas/{plantilla_id}")
-async def actualizar_plantilla(plantilla_id: int, datos: PlantillaPostVentaInput):
+async def actualizar_plantilla(plantilla_id: int, datos: PlantillaPostVentaInput, authorization: str = Header(None)):
     """Actualiza una plantilla existente en la base de datos."""
     try:
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_registro("plantillas_postventa", plantilla_id, user_id)
         # Preparamos los datos que vamos a actualizar
         payload = {
             "nombre": datos.nombre,
             "dias_espera": datos.dias_espera,
             "texto": datos.texto
         }
-        
+
         # Ejecutamos el update en Supabase filtrando por el ID de la plantilla
-        res = supabase.table("plantillas_postventa").update(payload).eq("id", plantilla_id).execute()
-        
+        res = await asyncio.to_thread(
+            lambda: supabase.table("plantillas_postventa").update(payload).eq("id", plantilla_id).execute()
+        )
+
         return {"status": "success", "data": res.data}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ ERROR EN PUT PLANTILLAS: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.post("/api/plantillas")
-async def crear_plantilla(datos: PlantillaPostVentaInput):
+async def crear_plantilla(datos: PlantillaPostVentaInput, authorization: str = Header(None)):
     """Guarda una nueva plantilla en la base de datos."""
     try:
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_comercio(datos.comercio_id, user_id)
         payload = {
             "comercio_id": datos.comercio_id,
             "nombre": datos.nombre,
             "dias_espera": datos.dias_espera,
             "texto": datos.texto
         }
-        res = supabase.table("plantillas_postventa").insert(payload).execute()
+        res = await asyncio.to_thread(
+            lambda: supabase.table("plantillas_postventa").insert(payload).execute()
+        )
         return {"status": "success", "data": res.data}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ ERROR EN POST PLANTILLAS: {str(e)}")  # Revisar en logs de Railway
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/plantillas/{plantilla_id}")
-async def eliminar_plantilla(plantilla_id: int):
+async def eliminar_plantilla(plantilla_id: int, authorization: str = Header(None)):
     """Elimina una plantilla específica."""
     try:
-        res = supabase.table("plantillas_postventa").delete().eq("id", plantilla_id).execute()
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_registro("plantillas_postventa", plantilla_id, user_id)
+        await asyncio.to_thread(
+            lambda: supabase.table("plantillas_postventa").delete().eq("id", plantilla_id).execute()
+        )
         return {"status": "success", "message": "Plantilla eliminada"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
@@ -556,7 +602,7 @@ async def alertar_suspension_dueno(telefono_dueno, instance_name):
     
 async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original):
     # 1. Filtro de seguridad inicial
-    if verificar_numero_excluido(id_remitente_limpio, comercio_id):
+    if await asyncio.to_thread(verificar_numero_excluido, id_remitente_limpio, comercio_id):
         print(f"🤫 [Filtro Blacklist] Mensaje de {id_remitente_limpio} ignorado.")
         await obtener_y_limpiar_buffer(id_remitente_limpio)
         return
@@ -569,20 +615,30 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     # Limpieza de memoria: Quitamos el timer apenas empieza el proceso
     timers_debounce.pop(id_remitente_limpio, None)
 
+    # 3. Obtención de datos FUERZANDO actualización + chequeo de saldo
+    # (el DESCUENTO del crédito se hace más abajo, solo si Gemini responde con
+    # éxito — antes se descontaba acá mismo, así que un 429/error de Gemini le
+    # cobraba un mensaje al comercio por una respuesta que el cliente nunca recibió)
+    es_trial = False
+    creditos_demo = 0
+    saldo_mensajes = 0
+    plan_actual = "basico"
+    tel_dueno = None
+    facturacion_disponible = False
     try:
-        # 3. Obtención de datos FUERZANDO actualización
         comercio_db = await obtener_comercio(instance_name, forzar_actualizacion=True)
         if comercio_db:
             estado = str(comercio_db.get("estado_suscripcion", "trial")).lower().strip()
             plan_actual_db = str(comercio_db.get("plan_actual", "basico")).lower().strip()
             plan_actual = plan_actual_db.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
-            
+
             tel_dueno = comercio_db.get("telefono_dueno")
             creditos_demo = comercio_db.get("creditos_demo", 0)
             saldo_mensajes = comercio_db.get("mensajes_disponibles", 0)
 
             es_trial = (estado == "trial")
             saldo_actual = creditos_demo if es_trial else saldo_mensajes
+            facturacion_disponible = True
 
             if saldo_actual <= 0:
                 print(f"🚫 [SaaS] Comercio {comercio_id} sin créditos. Bloqueando respuesta silenciosamente.")
@@ -591,20 +647,6 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
                 except Exception as e:
                     print(f"⚠️ No se pudo enviar la alerta de suspensión al dueño: {e}")
                 return
-
-            # Realizar el descuento
-            if es_trial:
-                nuevo_saldo = creditos_demo - 1
-                supabase.table("comercios").update({"creditos_demo": nuevo_saldo}).eq("id", comercio_id).execute()
-                if nuevo_saldo in [10, 2]: 
-                    await alertar_consumo_dueno(tel_dueno, 90 if nuevo_saldo == 10 else 95, nuevo_saldo, instance_name)
-            else:
-                nuevo_saldo = saldo_mensajes - 1
-                supabase.table("comercios").update({"mensajes_disponibles": nuevo_saldo}).eq("id", comercio_id).execute()
-                topes = {"basico": 1000, "pro": 3500, "premium": 10000}
-                limite = topes.get(plan_actual, 1000)
-                if nuevo_saldo == int(limite * 0.20) or nuevo_saldo == int(limite * 0.05):
-                    await alertar_consumo_dueno(tel_dueno, 80 if nuevo_saldo > (limite * 0.1) else 95, nuevo_saldo, instance_name)
         else:
             return
     except Exception as e:
@@ -647,17 +689,47 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             historial_previo = []
             
         # Inicializamos el agente pasándole la lista de diccionarios cruda de la BD
-        sesiones_chat[session_key] = iniciar_agente(comercio_id, numero_destino, historial_base=historial_previo)
+        # (iniciar_agente hace consultas sincrónicas a Supabase adentro, por eso el to_thread)
+        sesiones_chat[session_key] = await asyncio.to_thread(
+            iniciar_agente, comercio_id, numero_destino, historial_base=historial_previo
+        )
         
     chat_actual = sesiones_chat[session_key]
 
     # 5. Envío a Gemini con Captura de Errores de Cuota de Emergencia
     try:
-        respuesta = chat_actual.send_message(elementos_prompt)
+        # chat_actual.send_message es sincrónico y además dispara las tools
+        # (consultar_inventario, agendar_cita, etc.), que a su vez hacen consultas
+        # sincrónicas a Supabase — todo eso bloqueaba el event loop entero mientras
+        # un mensaje se procesaba, frenando a TODOS los demás comercios mientras tanto.
+        respuesta = await asyncio.to_thread(chat_actual.send_message, elementos_prompt)
         texto_respuesta = respuesta.text or "Aguardame un segundo que reviso el sistema..."
-            
+
+        # 💳 DESCONTAR EL CRÉDITO ACÁ, recién ahora que Gemini respondió con éxito
+        # (si esto falla, no le negamos la respuesta al cliente por un problema de facturación)
+        if facturacion_disponible:
+            try:
+                if es_trial:
+                    nuevo_saldo = creditos_demo - 1
+                    await asyncio.to_thread(
+                        lambda: supabase.table("comercios").update({"creditos_demo": nuevo_saldo}).eq("id", comercio_id).execute()
+                    )
+                    if nuevo_saldo in [10, 2]:
+                        await alertar_consumo_dueno(tel_dueno, 90 if nuevo_saldo == 10 else 95, nuevo_saldo, instance_name)
+                else:
+                    nuevo_saldo = saldo_mensajes - 1
+                    await asyncio.to_thread(
+                        lambda: supabase.table("comercios").update({"mensajes_disponibles": nuevo_saldo}).eq("id", comercio_id).execute()
+                    )
+                    topes = {"basico": 1000, "pro": 3500, "premium": 10000}
+                    limite = topes.get(plan_actual, 1000)
+                    if nuevo_saldo == int(limite * 0.20) or nuevo_saldo == int(limite * 0.05):
+                        await alertar_consumo_dueno(tel_dueno, 80 if nuevo_saldo > (limite * 0.1) else 95, nuevo_saldo, instance_name)
+            except Exception as e_billing:
+                print(f"❌ [SaaS] Error al descontar crédito (la respuesta ya se generó igual): {e_billing}")
+
         await enviar_mensaje_whatsapp(numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
-        
+
         # 💾 GUARDADO ATÓMICO EN LA MEMORIA DE SUPABASE
         try:
             await asyncio.to_thread(
@@ -865,14 +937,17 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
 # --- ENDPOINTS MERCADOPAGO ---
 @app.post("/api/checkout/crear-preferencia")
-async def crear_preferencia(request: Request):
+async def crear_preferencia(request: Request, authorization: str = Header(None)):
     try:
         body = await request.json()
         comercio_id = body.get("comercio_id")
         tipo_plan = body.get("tipo_plan", "pro").lower()
-        
+
         if not comercio_id:
             raise HTTPException(status_code=400, detail="Falta el comercio_id")
+
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_comercio(int(comercio_id), user_id)
 
         if not mp_access_token:
             raise HTTPException(status_code=500, detail="SDK de MercadoPago no configurado en el servidor")
@@ -903,7 +978,7 @@ async def crear_preferencia(request: Request):
             "auto_return": "approved"
         }
 
-        preference_response = mp.preference().create(preference_data)
+        preference_response = await asyncio.to_thread(lambda: mp.preference().create(preference_data))
         print(f"🔍 PREFERENCIA CREADA: {preference_response.get('response', {}).get('id')}")
 
         if preference_response.get("status") not in [200, 201]:
@@ -913,6 +988,8 @@ async def crear_preferencia(request: Request):
         preference = preference_response["response"]
         return {"init_point": preference["init_point"]}
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ Error creando preferencia de MP: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -931,9 +1008,9 @@ async def webhook_mercadopago(request: Request):
                 print(f"🛡️ [MercadoPago] Webhook duplicado atajado en Redis: {payment_id}")
                 return {"status": "ignored", "message": "Pago ya procesado recientemente"}
             
-            payment_info = mp.payment().get(payment_id)
+            payment_info = await asyncio.to_thread(lambda: mp.payment().get(payment_id))
             payment_data = payment_info.get("response", {})
-            
+
             status = payment_data.get("status")
             external_reference = payment_data.get("external_reference")
 
@@ -943,7 +1020,9 @@ async def webhook_mercadopago(request: Request):
                 tipo_plan = partes[1] if len(partes) > 1 else "pro"
 
                 # 2. BARRERA DE BASE DE DATOS: Verificamos si este pago ya se aplicó
-                comercio_res = supabase.table("comercios").select("ultimo_pago_id").eq("id", int(comercio_id)).execute()
+                comercio_res = await asyncio.to_thread(
+                    lambda: supabase.table("comercios").select("ultimo_pago_id").eq("id", int(comercio_id)).execute()
+                )
                 
                 if comercio_res.data:
                     ultimo_pago_guardado = str(comercio_res.data[0].get("ultimo_pago_id"))
@@ -960,13 +1039,15 @@ async def webhook_mercadopago(request: Request):
                 
                 # 3. ACTUALIZACIÓN ATÓMICA CON SELLO DE PAGO
                 # Actualizamos el plan y sellamos el comercio con este payment_id
-                supabase.table("comercios").update({
-                    "estado_suscripcion": "activa",
-                    "plan_actual": tipo_plan,
-                    "mensajes_disponibles": mensajes_a_cargar,
-                    "plan_vence_el": fecha_vencimiento,
-                    "ultimo_pago_id": payment_id  # 🔒 Este es tu nuevo candado
-                }).eq("id", int(comercio_id)).execute()
+                await asyncio.to_thread(
+                    lambda: supabase.table("comercios").update({
+                        "estado_suscripcion": "activa",
+                        "plan_actual": tipo_plan,
+                        "mensajes_disponibles": mensajes_a_cargar,
+                        "plan_vence_el": fecha_vencimiento,
+                        "ultimo_pago_id": payment_id  # 🔒 Este es tu nuevo candado
+                    }).eq("id", int(comercio_id)).execute()
+                )
                 
                 # Eliminada la vieja línea de pagos_procesados_cache.add(payment_id)
                 
@@ -987,7 +1068,9 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
             return False
 
         # 1. Validar Plan
-        comercio_res = supabase.table("comercios").select("plan_actual").eq("id", comercio_id).execute()
+        comercio_res = await asyncio.to_thread(
+            lambda: supabase.table("comercios").select("plan_actual").eq("id", comercio_id).execute()
+        )
         if not comercio_res.data:
             print("❌ Falla: Comercio no encontrado.")
             return False
@@ -1003,7 +1086,9 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
         detalles_equipos = []
         if celulares_ids:
             ids_limpios = [int(nid) for nid in celulares_ids]
-            equipos_res = supabase.table("inventario_celulares").select("modelo, capacidad").in_("id", ids_limpios).execute()
+            equipos_res = await asyncio.to_thread(
+                lambda: supabase.table("inventario_celulares").select("modelo, capacidad").in_("id", ids_limpios).execute()
+            )
             for eq in equipos_res.data:
                 cap = f" ({eq['capacidad']})" if eq.get("capacidad") else ""
                 detalles_equipos.append(f"{eq['modelo']}{cap}")
@@ -1021,7 +1106,9 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
         
         if str(estrategia_o_plantilla).isdigit():
             plantilla_id = int(estrategia_o_plantilla)
-            plantilla_res = supabase.table("plantillas_postventa").select("*").eq("id", plantilla_id).execute()  
+            plantilla_res = await asyncio.to_thread(
+                lambda: supabase.table("plantillas_postventa").select("*").eq("id", plantilla_id).execute()
+            )
                       
             if plantilla_res.data:
                 plantilla = plantilla_res.data[0]
@@ -1063,12 +1150,14 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
         }
         
         # 5. INSERCIÓN SEGURA: Dejamos que Supabase maneje la unicidad
-        res_insert = supabase.table("cola_mensajes_postventa").insert(payload_postventa).execute()
-        
+        res_insert = await asyncio.to_thread(
+            lambda: supabase.table("cola_mensajes_postventa").insert(payload_postventa).execute()
+        )
+
         # 🌟 EL GATILLO DE UPSTASH: Solo se programa si se insertó un registro nuevo realmente
         if res_insert.data:
             nuevo_id = res_insert.data[0]["id"]
-            programar_evento_futuro("postventa", nuevo_id, fecha_disparo_dt)
+            await asyncio.to_thread(programar_evento_futuro, "postventa", nuevo_id, fecha_disparo_dt)
             print(f"🎉 ¡Post-Venta Agendado con precisión de minutos! Estrategia usada: {nombre_estrategia}")
             
         return True  # ✅ Retorna True porque se agendó con éxito
@@ -1084,23 +1173,28 @@ async def agendar_postventa(comercio_id: int, cliente_nombre: str, telefono: str
             return False
 
 @app.post("/api/ventas/directa")
-async def registrar_venta_directa(request: Request):
+async def registrar_venta_directa(request: Request, authorization: str = Header(None)):
     try:
         datos = await request.json()
         comercio_id = datos.get("comercio_id")
         cliente_nombre = datos.get("cliente_nombre", "Cliente Local")
         telefono = datos.get("telefono")
         celulares_ids = datos.get("celulares_ids", [])
-        
+
         estrategia_o_plantilla = datos.get("plantilla_id") or datos.get("estrategia", "satisfaccion")
 
         if not comercio_id or not celulares_ids:
             raise HTTPException(status_code=400, detail="Faltan datos obligatorios")
 
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_comercio(int(comercio_id), user_id)
+
         for nid in celulares_ids:
-            supabase.table("inventario_celulares").update({
-                "estado_venta": "vendido"
-            }).eq("id", int(nid)).execute()
+            await asyncio.to_thread(
+                lambda nid=nid: supabase.table("inventario_celulares").update({
+                    "estado_venta": "vendido"
+                }).eq("id", int(nid)).execute()
+            )
 
         fecha_hoy = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         insert_payload = {
@@ -1112,7 +1206,9 @@ async def registrar_venta_directa(request: Request):
             "estado": "completado",
             "fecha_turno": fecha_hoy
         }
-        supabase.table("turnos_clientes").insert(insert_payload).execute()
+        await asyncio.to_thread(
+            lambda: supabase.table("turnos_clientes").insert(insert_payload).execute()
+        )
 
         # Capturamos si se agendó o no
         postventa_agendada = await agendar_postventa(int(comercio_id), cliente_nombre, telefono, celulares_ids, estrategia_o_plantilla)
@@ -1122,22 +1218,29 @@ async def registrar_venta_directa(request: Request):
             "message": "Venta registrada.",
             "postventa_agendada": postventa_agendada # Se lo mandamos a React
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ Error en registro de venta directa: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/turnos/{turno_id}/completar")
-async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: int = None):
+async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: int = None, authorization: str = Header(None)):
     try:
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_registro("turnos_clientes", turno_id, user_id)
+
         # 1. BLOQUEO ATÓMICO: Solo completamos si el turno estaba PENDIENTE
         # Esto evita que dos clics simultáneos disparen el proceso dos veces.
-        lock = supabase.table("turnos_clientes")\
-            .update({"estado": "completado"})\
-            .eq("id", turno_id)\
-            .eq("estado", "pendiente")\
+        lock = await asyncio.to_thread(
+            lambda: supabase.table("turnos_clientes")
+            .update({"estado": "completado"})
+            .eq("id", turno_id)
+            .eq("estado", "pendiente")
             .execute()
-        
+        )
+
         if not lock.data:
             # Si no hay data, es porque el turno ya no estaba pendiente o no existe
             raise HTTPException(status_code=400, detail="El turno ya fue procesado o no existe.")
@@ -1152,10 +1255,12 @@ async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: i
         # 3. Actualización de inventario
         if celulares_ids:
             for nid in celulares_ids:
-                supabase.table("inventario_celulares").update({
-                    "estado_venta": "vendido",
-                    "stock": 0 
-                }).eq("id", int(nid)).execute()
+                await asyncio.to_thread(
+                    lambda nid=nid: supabase.table("inventario_celulares").update({
+                        "estado_venta": "vendido",
+                        "stock": 0
+                    }).eq("id", int(nid)).execute()
+                )
         
         # 4. Agendamiento de postventa
         estrategia_final = plantilla_id if plantilla_id else (estrategia or "satisfaccion")
@@ -1180,19 +1285,24 @@ async def completar_turno(turno_id: int, estrategia: str = None, plantilla_id: i
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.put("/api/postventa/{id_registro}")
-async def editar_mensaje_postventa(id_registro: int, datos: EditarPostVentaInput):
+async def editar_mensaje_postventa(id_registro: int, datos: EditarPostVentaInput, authorization: str = Header(None)):
     """Permite al comerciante modificar el texto y la fecha de un mensaje programado."""
     try:
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_registro("cola_mensajes_postventa", id_registro, user_id)
+
         # 1. Actualizamos en la base de datos
-        res = supabase.table("cola_mensajes_postventa") \
+        res = await asyncio.to_thread(
+            lambda: supabase.table("cola_mensajes_postventa")
             .update({
                 "mensaje_texto": datos.mensaje_texto,
                 "fecha_envio": datos.fecha_envio,
                 "estado": "pendiente" # Por si estaba fallido y lo corrigen
-            }) \
-            .eq("id", id_registro) \
+            })
+            .eq("id", id_registro)
             .execute()
-            
+        )
+
         if not res.data:
             raise HTTPException(status_code=404, detail="Registro no encontrado")
             
@@ -1208,14 +1318,16 @@ async def editar_mensaje_postventa(id_registro: int, datos: EditarPostVentaInput
                 nueva_fecha_obj = datetime.strptime(datos.fecha_envio, "%Y-%m-%d").replace(hour=12, minute=0)
             
             # Avisamos a Upstash del nuevo horario
-            programar_evento_futuro("postventa", id_registro, nueva_fecha_obj)
+            await asyncio.to_thread(programar_evento_futuro, "postventa", id_registro, nueva_fecha_obj)
             print(f"🔄 Gatillo de Post-Venta ID {id_registro} reprogramado para {nueva_fecha_obj}")
             
         except Exception as e:
             print(f"⚠️ Error al reprogramar QStash (el registro en BD se actualizó igual): {e}")
 
         return {"status": "success", "message": "Mensaje actualizado correctamente", "data": res.data}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"❌ Error al editar postventa: {e}")
         raise HTTPException(status_code=500, detail=str(e))

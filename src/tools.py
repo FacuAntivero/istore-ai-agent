@@ -64,6 +64,46 @@ def consultar_horarios(comercio_id: int, telefono_cliente: str) -> str:
         solicitar_asistencia_humana("Falla técnica del servidor al intentar consultar los horarios", telefono_cliente, comercio_id)
         return "SISTEMA_DELAY: No se pudieron leer los horarios, ya notificamos automáticamente a un asesor humano. Pide disculpas de forma muy cercana y dile que un compañero lo atenderá enseguida"
 
+def _reservar_stock_atomico(celular_id: int) -> bool:
+    """
+    Descuenta 1 unidad de stock de forma segura ante concurrencia.
+
+    El cliente de Supabase (PostgREST) no permite expresar "stock = stock - 1"
+    en un solo UPDATE, así que hacemos "compare-and-swap": leemos el stock,
+    y el UPDATE solo se aplica si el stock sigue siendo exactamente el que
+    leímos (.eq("stock", stock_leido)). Si otra conversación reservó la
+    última unidad en el medio, el UPDATE no afecta ninguna fila y lo
+    detectamos por .data vacío, en vez de pisar su reserva silenciosamente.
+    Devuelve True si se reservó con éxito, False si no había stock disponible.
+    """
+    item = supabase.table("inventario_celulares").select("stock").eq("id", celular_id).execute()
+    if not item.data or item.data[0]["stock"] <= 0:
+        return False
+
+    stock_leido = item.data[0]["stock"]
+    nuevo_stock = stock_leido - 1
+    nuevo_estado = "pendiente" if nuevo_stock == 0 else "disponible"
+
+    update_res = supabase.table("inventario_celulares").update({
+        "stock": nuevo_stock,
+        "estado_venta": nuevo_estado
+    }).eq("id", celular_id).eq("stock", stock_leido).execute()
+
+    return bool(update_res.data)
+
+
+def _liberar_stock(celular_id: int) -> None:
+    """Devuelve 1 unidad de stock (con el mismo guard de compare-and-swap)."""
+    item = supabase.table("inventario_celulares").select("stock").eq("id", celular_id).execute()
+    if not item.data:
+        return
+    stock_leido = item.data[0]["stock"]
+    supabase.table("inventario_celulares").update({
+        "stock": stock_leido + 1,
+        "estado_venta": "disponible"
+    }).eq("id", celular_id).eq("stock", stock_leido).execute()
+
+
 def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_id: int = None, comercio_id: int = None) -> str:
     """Agenda o modifica una cita reservando el stock y programa el recordatorio exacto."""
     print(f"\n[Sistema] 📅 Ejecutando agendar_cita: {cliente_nombre} ({telefono}) con fecha {fecha_turno}")
@@ -131,27 +171,13 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
 
             # 🟢 LIBERAMOS STOCK (Vuelve a estar disponible)
             for vid in ids_a_liberar:
-                item = supabase.table("inventario_celulares").select("stock").eq("id", vid).execute()
-                if item.data:
-                    nuevo_stock = item.data[0]["stock"] + 1
-                    supabase.table("inventario_celulares").update({
-                        "stock": nuevo_stock,
-                        "estado_venta": "disponible"
-                    }).eq("id", vid).execute()
-                
+                _liberar_stock(vid)
+
             # 🔴 RESERVAMOS STOCK EN MODIFICACIÓN DE TURNO
             for nid in ids_a_reservar:
-                item = supabase.table("inventario_celulares").select("stock").eq("id", nid).execute()
-                if item.data and item.data[0]["stock"] > 0:
-                    nuevo_stock = item.data[0]["stock"] - 1
-                    nuevo_estado = "pendiente" if nuevo_stock == 0 else "disponible"
-                    supabase.table("inventario_celulares").update({
-                        "stock": nuevo_stock,
-                        "estado_venta": nuevo_estado
-                    }).eq("id", nid).execute()
-                else:
+                if not _reservar_stock_atomico(nid):
                     return "uh justo acaban de reservar la ultima unidad de ese equipo especifico... podras ofrecerle otra alternativa?"
-                        
+
             update_payload = {
                 "cliente_nombre": cliente_nombre,
                 "fecha_turno": fecha_iso,
@@ -166,15 +192,7 @@ def agendar_cita(cliente_nombre: str, telefono: str, fecha_turno: str, celular_i
         else:
             # 🔴 RESERVAMOS STOCK PARA UN TURNO NUEVO
             for nid in celulares_ids_nuevos:
-                item = supabase.table("inventario_celulares").select("stock").eq("id", nid).execute()
-                if item.data and item.data[0]["stock"] > 0:
-                    nuevo_stock = item.data[0]["stock"] - 1
-                    nuevo_estado = "pendiente" if nuevo_stock == 0 else "disponible"
-                    supabase.table("inventario_celulares").update({
-                        "stock": nuevo_stock,
-                        "estado_venta": nuevo_estado
-                    }).eq("id", nid).execute()
-                else:
+                if not _reservar_stock_atomico(nid):
                     return "uy no queda stock disponible para reservar ese equipo especifico"
 
             insert_payload = {

@@ -1,9 +1,6 @@
 import json
 import redis.asyncio as redis
 import config
-# Reusamos el mismo cliente de Supabase que el resto de la app (database.py)
-# en vez de abrir una conexión nueva acá — un solo pool de conexiones por proceso.
-from database import supabase as supabase_client
 
 # ==========================================
 # 🔌 INICIALIZACIÓN DE CONEXIONES (Redis)
@@ -54,70 +51,6 @@ async def obtener_y_limpiar_buffer(id_remitente: str) -> list:
     if mensajes_crudos:
         await redis_db.delete(key)
     return [json.loads(m) for m in mensajes_crudos]
-
-
-# ==========================================
-# 🧠 MEMORIA DE GEMINI (Historial con Supabase)
-# ==========================================
-
-async def guardar_historial_chat(session_key: str, historial_dict: list):
-    """
-    Guarda los NUEVOS mensajes en la base de datos de Supabase.
-    Recibe la lista completa actual, pero solo inserta los registros que no existan
-    o simplemente añade las nuevas interacciones de forma limpia.
-    Nota: Para evitar duplicados en la base de datos al enviar toda la lista,
-    lo ideal es pasarle solo los últimos mensajes o limpiar/guardar según tu lógica en agent.py o server.py.
-    Esta función toma el último par (o mensaje) y lo inserta.
-    """
-    if not historial_dict:
-        return
-
-    # Usualmente Gemini añade el mensaje del usuario y del modelo. 
-    # Tomamos el último mensaje generado en la sesión para insertarlo de forma atómica.
-    ultimo_mensaje = historial_dict[-1]
-    
-    # Adaptamos los campos a la tabla que creamos
-    datos_insercion = {
-        "telefono_cliente": str(session_key),
-        "rol": ultimo_mensaje.get("role", "user"), # Puede venir como 'role' o 'rol' según tu agent.py
-        "contenido": ultimo_mensaje.get("parts", [""])[0] if isinstance(ultimo_mensaje.get("parts"), list) else ultimo_mensaje.get("parts", "")
-    }
-    
-    # Insertamos en Supabase de forma sincrónica (la librería de supabase ejecuta bloqueante por defecto)
-    try:
-        supabase_client.table("historial_chat_ia").insert(datos_insercion).execute()
-    except Exception as e:
-        print(f"❌ Error al guardar historial en Supabase: {e}")
-
-
-async def obtener_historial_chat(session_key: str) -> list:
-    """Recupera los últimos 20 mensajes de Supabase para inyectárselos a Gemini."""
-    try:
-        # Buscamos los mensajes del número de teléfono, ordenados por fecha ascendente
-        respuesta = (
-            supabase_client.table("historial_chat_ia")
-            .select("rol", "contenido")
-            .eq("telefono_cliente", str(session_key))
-            .order("created_at", descending=False)
-            .limit(20) # Traemos los últimos 20 para no saturar el contexto de Gemini
-            .execute()
-        )
-        
-        registros = respuesta.data
-        historial_gemini = []
-        
-        # Mapeamos los datos al formato exacto que espera tu script/Gemini
-        for reg in registros:
-            historial_gemini.append({
-                "role": reg["rol"],
-                "parts": [reg["contenido"]]
-            })
-            
-        return historial_gemini
-        
-    except Exception as e:
-        print(f"❌ Error al obtener historial de Supabase: {e}")
-        return []
 
 
 # ==========================================
