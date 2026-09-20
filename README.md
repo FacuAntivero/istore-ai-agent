@@ -37,6 +37,21 @@ en `.env.example` y centralizadas en `src/config.py` — si falta alguna
 obligatoria, el proceso corta al arrancar con un mensaje claro en vez de
 fallar más adelante de forma confusa.
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
+No necesitan `.env` ni credenciales reales — `tests/conftest.py` fuerza
+variables dummy antes de importar cualquier módulo, y los tests reemplazan
+`supabase` por un doble de prueba (`tests/fake_supabase.py`) que no pega a
+la red. Cubren específicamente la lógica más delicada: la reserva atómica
+de stock (`tests/test_stock.py`) y la verificación de que un comercio no
+pueda tocar los datos de otro (`tests/test_auth.py`). No son exhaustivos —
+si agregás lógica nueva de negocio o de permisos, sumale su test.
+
 ## Scripts sueltos (no forman parte del servidor)
 
 - `src/conectar.py` / `src/conectar_qr.py`: crean una instancia nueva en
