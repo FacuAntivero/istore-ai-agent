@@ -37,9 +37,18 @@ SUPABASE_KEY = _requerida("SUPABASE_KEY")
 # --- Google Gemini (agente de IA) ---
 GEMINI_API_KEY = _requerida("GEMINI_API_KEY")
 
-# --- Evolution API (gateway de WhatsApp) ---
+# --- Evolution API (gateway de WhatsApp, vertical "celulares"/Novva) ---
 EVOLUTION_API_URL = _requerida("EVOLUTION_API_URL")
 EVOLUTION_API_KEY = _requerida("EVOLUTION_API_KEY")
+
+# --- Meta WhatsApp Cloud API (gateway oficial, vertical "consultorio") ---
+# El access_token y el phone_number_id son POR TENANT (van en comercios, no
+# acá) porque cada consultorio real va a tener su propio número de Meta.
+# Estas dos son a nivel de la App de Meta en sí, compartidas entre tenants:
+# el secreto para validar la firma de los webhooks entrantes, y el token que
+# vos elegís para el handshake de suscripción del webhook.
+META_APP_SECRET = _requerida("META_APP_SECRET")
+META_VERIFY_TOKEN = _requerida("META_VERIFY_TOKEN")
 
 # --- Redis / Upstash (buffer de mensajes, anti-duplicados, caché) ---
 UPSTASH_REDIS_URL = _requerida("UPSTASH_REDIS_URL")

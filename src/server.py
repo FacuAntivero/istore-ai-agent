@@ -17,13 +17,15 @@ sys.path.insert(0, os.path.dirname(__file__))
 from tools import verificar_numero_excluido
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from google.genai import errors, types
 from pydantic import BaseModel
 import config
 from database import supabase
-from agent import iniciar_agente
+from agent import iniciar_agente, iniciar_agente_consultorio
 import auth
+import meta_client
 
 # 🧠 Imports para los recordatorios automáticos
 from contextlib import asynccontextmanager
@@ -47,11 +49,11 @@ async def worker_procesador_cola():
     while True:
         # Esperamos a que entre un nuevo bloque a la cola
         tarea = await cola_mensajes.get()
-        id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original = tarea
-        
+        id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original, canal = tarea
+
         try:
-            
-            await procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original)
+
+            await procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original, canal)
             
             # Pequeña pausa extra humana entre clientes (1 a 3 segundos) antes de leer al siguiente
             await asyncio.sleep(random.uniform(1.0, 3.0))
@@ -80,7 +82,7 @@ app.add_middleware(
 )
 
 class PayloadWebhookMensaje(BaseModel):
-    tipo: str          # "cita" o "postventa"
+    tipo: str          # "cita", "postventa" o "turno_consultorio"
     registro_id: int   # El ID en la base de datos
 
 class NgrokHeaderMiddleware(BaseHTTPMiddleware):
@@ -149,6 +151,122 @@ async def delete_numero_excluido(id_numero: int, authorization: str = Header(Non
     except Exception as e:
         print(f"Error en DELETE numeros-excluidos: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+async def _instancia_del_comercio(comercio_id: int) -> Optional[str]:
+    res = await asyncio.to_thread(
+        lambda: supabase.table("comercios").select("evolution_instance").eq("id", comercio_id).single().execute()
+    )
+    return res.data.get("evolution_instance") if res.data else None
+
+
+async def _asignar_webhook_evolution(instance_name: str):
+    headers = {"apikey": config.EVOLUTION_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "webhook": {
+            "enabled": True,
+            "url": f"{config.URL_RAILWAY}/webhook",
+            "webhookByEvents": False,
+            "events": ["MESSAGES_UPSERT"]
+        }
+    }
+    try:
+        await asyncio.to_thread(
+            requests.post, f"{config.EVOLUTION_API_URL}/webhook/set/{instance_name}",
+            json=payload, headers=headers
+        )
+    except requests.RequestException as e:
+        print(f"Error asignando webhook de Evolution: {e}")
+
+
+async def _estado_evolution(instance_name: str) -> str:
+    headers = {"apikey": config.EVOLUTION_API_KEY}
+    try:
+        res = await asyncio.to_thread(
+            requests.get, f"{config.EVOLUTION_API_URL}/instance/connectionState/{instance_name}",
+            headers=headers
+        )
+        if res.status_code != 200:
+            return "DESCONECTADO"
+        if res.json().get("instance", {}).get("state") == "open":
+            await _asignar_webhook_evolution(instance_name)
+            return "CONECTADO"
+        return "DESCONECTADO"
+    except requests.RequestException:
+        return "DESCONECTADO"
+
+
+@app.get("/api/whatsapp/estado/{comercio_id}")
+async def estado_whatsapp(comercio_id: int, authorization: str = Header(None)):
+    try:
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_comercio(comercio_id, user_id)
+        instance_name = await _instancia_del_comercio(comercio_id)
+        if not instance_name:
+            return {"status": "DESCONECTADO"}
+        return {"status": await _estado_evolution(instance_name)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error en GET whatsapp/estado: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/whatsapp/conectar/{comercio_id}")
+async def conectar_whatsapp(comercio_id: int, authorization: str = Header(None)):
+    try:
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_comercio(comercio_id, user_id)
+        instance_name = await _instancia_del_comercio(comercio_id)
+        if not instance_name:
+            raise HTTPException(status_code=400, detail="El comercio no tiene una instancia de WhatsApp configurada")
+
+        headers = {"apikey": config.EVOLUTION_API_KEY, "Content-Type": "application/json"}
+        res_create = await asyncio.to_thread(
+            requests.post, f"{config.EVOLUTION_API_URL}/instance/create",
+            json={"instanceName": instance_name, "integration": "WHATSAPP-BAILEYS", "qrcode": True},
+            headers=headers
+        )
+        print(f"[whatsapp/conectar] instance/create -> {res_create.status_code}: {res_create.text[:300]}")
+
+        res = await asyncio.to_thread(
+            requests.get, f"{config.EVOLUTION_API_URL}/instance/connect/{instance_name}",
+            headers=headers
+        )
+        print(f"[whatsapp/conectar] instance/connect -> {res.status_code}: {res.text[:300]}")
+
+        if res.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Evolution API respondió {res.status_code} al conectar")
+
+        qr = res.json().get("base64")
+        if not qr:
+            raise HTTPException(status_code=502, detail="Evolution API no devolvió un código QR")
+        return {"qrCode": qr}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error en POST whatsapp/conectar: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/whatsapp/desconectar/{comercio_id}")
+async def desconectar_whatsapp(comercio_id: int, authorization: str = Header(None)):
+    try:
+        user_id = await auth.obtener_usuario_autenticado(authorization)
+        await auth.verificar_dueno_de_comercio(comercio_id, user_id)
+        instance_name = await _instancia_del_comercio(comercio_id)
+        if instance_name:
+            headers = {"apikey": config.EVOLUTION_API_KEY}
+            await asyncio.to_thread(
+                requests.delete, f"{config.EVOLUTION_API_URL}/instance/logout/{instance_name}",
+                headers=headers
+            )
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error en DELETE whatsapp/desconectar: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 def programar_evento_futuro(tipo_evento: str, registro_id: int, fecha_disparo: datetime):
     """
@@ -260,6 +378,68 @@ async def procesar_envio_inmediato(tipo: str, registro_id: int):
                 .execute()
             )
             print(f"✅ Recordatorio enviado: {turno.get('cliente_nombre')}")
+
+        elif tipo == "turno_consultorio":
+            # Mismo patrón de lock atómico que "cita" arriba, pero contra
+            # turnos_consultorio y enviando por Meta Cloud API en vez de
+            # Evolution.
+            lock = await asyncio.to_thread(
+                lambda: supabase.table("turnos_consultorio")
+                .update({"estado": "procesando"})
+                .eq("id", registro_id)
+                .eq("estado", "pendiente")
+                .eq("recordatorio_enviado", False)
+                .execute()
+            )
+
+            if not lock.data:
+                print(f"⚠️ [Ejecutor] Turno de consultorio ID {registro_id} ignorado: ya fue procesado.")
+                return
+
+            res = await asyncio.to_thread(
+                lambda: supabase.table("turnos_consultorio")
+                .select("*, comercio:comercio_id(meta_phone_number_id, meta_access_token)")
+                .eq("id", registro_id)
+                .execute()
+            )
+            turno = res.data[0]
+            phone_number_id = turno.get("comercio", {}).get("meta_phone_number_id")
+            access_token = turno.get("comercio", {}).get("meta_access_token")
+
+            fecha_obj = datetime.fromisoformat(turno["fecha_turno"].replace("Z", ""))
+
+            # ⚠️ Esto es un mensaje iniciado por el negocio (el paciente no
+            # escribió primero), así que Meta exige una plantilla
+            # pre-aprobada, no texto libre. El nombre "recordatorio_turno" y
+            # sus 3 variables ({{1}}=paciente, {{2}}=fecha, {{3}}=hora) hay
+            # que darlos de alta y esperar la aprobación en Meta Business
+            # Manager antes de que este envío funcione de verdad.
+            enviado = await asyncio.to_thread(
+                meta_client.enviar_plantilla_whatsapp_meta,
+                turno["telefono"], phone_number_id, access_token,
+                "recordatorio_turno", "es_AR",
+                [turno.get("paciente_nombre", "Paciente"), fecha_obj.strftime("%d/%m"), fecha_obj.strftime("%H:%M")]
+            )
+
+            if enviado:
+                await asyncio.to_thread(
+                    lambda: supabase.table("turnos_consultorio")
+                    .update({"recordatorio_enviado": True, "estado": "pendiente"})
+                    .eq("id", registro_id)
+                    .execute()
+                )
+                print(f"✅ Recordatorio de consultorio enviado: {turno.get('paciente_nombre')}")
+            else:
+                # Si Meta lo rechazó (ej: plantilla todavía no aprobada), lo
+                # volvemos a 'pendiente' para no dejarlo trabado en
+                # 'procesando' sin haber avisado nunca al paciente.
+                await asyncio.to_thread(
+                    lambda: supabase.table("turnos_consultorio")
+                    .update({"estado": "pendiente"})
+                    .eq("id", registro_id)
+                    .execute()
+                )
+                print(f"❌ No se pudo enviar el recordatorio de consultorio ID {registro_id} (¿plantilla no aprobada?)")
 
         elif tipo == "postventa":
             # 1. ATÓMICO: Lock para postventa
@@ -460,8 +640,40 @@ async def obtener_comercio(instancia, forzar_actualizacion=False):
             
     except Exception as e:
         print(f"[Supabase] ❌ Error crítico buscando comercio: {e}")
-    
+
     return None
+
+
+async def obtener_comercio_por_meta_phone_id(phone_number_id, forzar_actualizacion=False):
+    """Igual que obtener_comercio, pero para tenants de la vertical
+    'consultorio' (Meta Cloud API), que no tienen evolution_instance."""
+    if not forzar_actualizacion:
+        comercio_cache = await obtener_cache_comercio(phone_number_id)
+        if comercio_cache:
+            return comercio_cache
+
+    try:
+        res = await asyncio.to_thread(
+            lambda: supabase.table("comercios").select("*").eq("meta_phone_number_id", phone_number_id).execute()
+        )
+        if res.data:
+            comercio_actualizado = res.data[0]
+            await guardar_cache_comercio(phone_number_id, comercio_actualizado)
+            return comercio_actualizado
+    except Exception as e:
+        print(f"[Supabase] ❌ Error crítico buscando comercio (Meta): {e}")
+
+    return None
+
+
+async def obtener_comercio_por_canal(canal, identificador, forzar_actualizacion=False):
+    """Despacha a obtener_comercio (Evolution) u obtener_comercio_por_meta_phone_id
+    (Meta) según el canal del tenant. Un solo punto de entrada para que
+    procesar_bloque_mensajes no tenga que saber la diferencia."""
+    if canal == "meta":
+        return await obtener_comercio_por_meta_phone_id(identificador, forzar_actualizacion)
+    return await obtener_comercio(identificador, forzar_actualizacion)
+
 
 MI_NUMERO = config.MI_NUMERO
 
@@ -554,6 +766,28 @@ async def enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensa
         except Exception as e:
             print(f"❌ Error crítico de red: {e}")
 
+
+async def enviar_mensaje_por_canal(canal, comercio_db, numero_destino, texto, instance_name, id_mensaje=None, remote_jid=None):
+    """Despacha el envío a Evolution API (celulares) o Meta Cloud API
+    (consultorio) según el canal del tenant. Un solo punto de entrada para
+    que procesar_bloque_mensajes no tenga que bifurcar en cada llamado."""
+    if canal == "meta":
+        phone_number_id = comercio_db.get("meta_phone_number_id")
+        access_token = comercio_db.get("meta_access_token")
+        await asyncio.to_thread(meta_client.enviar_mensaje_whatsapp_meta, numero_destino, texto, phone_number_id, access_token)
+    else:
+        await enviar_mensaje_whatsapp(numero_destino, texto, instance_name, id_mensaje, remote_jid)
+
+
+def iniciar_agente_por_canal(canal, comercio_id, numero_destino, historial_previo):
+    """Despacha a iniciar_agente (celulares) o iniciar_agente_consultorio
+    (Meta) según el canal del tenant. Se llama siempre envuelto en
+    asyncio.to_thread desde procesar_bloque_mensajes, igual que antes."""
+    if canal == "meta":
+        return iniciar_agente_consultorio(comercio_id, numero_destino, historial_base=historial_previo)
+    return iniciar_agente(comercio_id, numero_destino, historial_base=historial_previo)
+
+
 # --- FUNCIÓN DE ALERTA AL DUEÑO (PREVIA) ---
 async def alertar_consumo_dueno(telefono_dueno, porcentaje, mensajes_restantes, instance_name):
     if not telefono_dueno: 
@@ -600,7 +834,7 @@ async def alertar_suspension_dueno(telefono_dueno, instance_name):
     await enviar_mensaje_whatsapp(tel_dueno_jid, mensaje, instance_name)
     print(f"🛑 [SaaS - SUSPENSIÓN] Se notificó al dueño ({tel_dueno_jid}) que el bot se quedó en 0.")
     
-async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original):
+async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid_original, canal="evolution"):
     # 1. Filtro de seguridad inicial
     if await asyncio.to_thread(verificar_numero_excluido, id_remitente_limpio, comercio_id):
         print(f"🤫 [Filtro Blacklist] Mensaje de {id_remitente_limpio} ignorado.")
@@ -625,8 +859,9 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
     plan_actual = "basico"
     tel_dueno = None
     facturacion_disponible = False
+    comercio_db = None
     try:
-        comercio_db = await obtener_comercio(instance_name, forzar_actualizacion=True)
+        comercio_db = await obtener_comercio_por_canal(canal, instance_name, forzar_actualizacion=True)
         if comercio_db:
             estado = str(comercio_db.get("estado_suscripcion", "trial")).lower().strip()
             plan_actual_db = str(comercio_db.get("plan_actual", "basico")).lower().strip()
@@ -691,7 +926,7 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         # Inicializamos el agente pasándole la lista de diccionarios cruda de la BD
         # (iniciar_agente hace consultas sincrónicas a Supabase adentro, por eso el to_thread)
         sesiones_chat[session_key] = await asyncio.to_thread(
-            iniciar_agente, comercio_id, numero_destino, historial_base=historial_previo
+            iniciar_agente_por_canal, canal, comercio_id, numero_destino, historial_previo
         )
         
     chat_actual = sesiones_chat[session_key]
@@ -728,7 +963,7 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
             except Exception as e_billing:
                 print(f"❌ [SaaS] Error al descontar crédito (la respuesta ya se generó igual): {e_billing}")
 
-        await enviar_mensaje_whatsapp(numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
+        await enviar_mensaje_por_canal(canal, comercio_db, numero_destino, texto_respuesta, instance_name, ultimo_id_mensaje, remote_jid_original)
 
         # 💾 GUARDADO ATÓMICO EN LA MEMORIA DE SUPABASE
         try:
@@ -748,7 +983,7 @@ async def procesar_bloque_mensajes(id_remitente_limpio, comercio_id, instance_na
         if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
             print(f"⚠️ [Cuota Excedida] Enviando mensaje de contingencia a {numero_destino} por saturación de Gemini.")
             msg_ocupado = "En este momento todos nuestros asesores están ocupados atendiendo a otros clientes. Por favor, aguardanos unos minutitos y volvé a escribirnos. ¡Gracias!"
-            await enviar_mensaje_whatsapp(numero_destino, msg_ocupado, instance_name, ultimo_id_mensaje, remote_jid_original)
+            await enviar_mensaje_por_canal(canal, comercio_db, numero_destino, msg_ocupado, instance_name, ultimo_id_mensaje, remote_jid_original)
             
 # --- DETECCIÓN DE TIPOS DE MENSAJE MULTIMEDIA ---
 def extraer_texto_y_tipo(msg_object):
@@ -908,7 +1143,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
             async def timer_task_audio():
                 await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
-                await cola_mensajes.put((id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid))
+                await cola_mensajes.put((id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid, "evolution"))
 
             timers_debounce[id_remitente_limpio] = asyncio.create_task(timer_task_audio())
             return {"status": "audio_en_espera"}
@@ -926,7 +1161,7 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
         async def timer_task():
             await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
-            await cola_mensajes.put((id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid))
+            await cola_mensajes.put((id_remitente_limpio, comercio_id, instance_name, numero_destino, remote_jid, "evolution"))
 
         timers_debounce[id_remitente_limpio] = asyncio.create_task(timer_task())
         return {"status": "en_espera"}
@@ -934,6 +1169,99 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
     except Exception as e:
         print(f"Error procesando mensaje: {e}")
         return {"status": "error"}
+
+
+# --- ENDPOINTS WEBHOOK META (vertical "consultorio") ---
+# Endpoints nuevos y separados del /webhook de Evolution de arriba: distinto
+# proveedor, distinto shape de payload, distinta forma de resolver el tenant
+# (por meta_phone_number_id en vez de evolution_instance). Reutilizan el
+# mismo debounce/cola/worker de siempre, solo etiquetando la tarea con
+# canal="meta" para que procesar_bloque_mensajes sepa despachar por Meta.
+
+@app.get("/webhook/meta")
+async def verificar_webhook_meta(request: Request):
+    """Handshake de suscripción que pide Meta al configurar el webhook en el
+    Business Manager: si el modo y el verify_token coinciden, hay que
+    devolver el challenge tal cual, como texto plano."""
+    params = request.query_params
+    modo = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge", "")
+
+    if modo == "subscribe" and token == config.META_VERIFY_TOKEN:
+        return PlainTextResponse(content=challenge)
+
+    raise HTTPException(status_code=403, detail="Verificación de webhook fallida")
+
+
+@app.post("/webhook/meta")
+async def recibir_mensaje_meta(request: Request):
+    body_bytes = await request.body()
+    firma = request.headers.get("X-Hub-Signature-256")
+
+    if not meta_client.verificar_firma_meta(body_bytes, firma, config.META_APP_SECRET):
+        print("🚨 [Meta Webhook] Firma inválida — posible request falsificado, se ignora.")
+        raise HTTPException(status_code=403, detail="Firma inválida")
+
+    try:
+        datos = json.loads(body_bytes)
+        entry = datos["entry"][0]
+        cambio = entry["changes"][0]
+        value = cambio["value"]
+
+        # Meta manda al mismo webhook tanto mensajes nuevos como
+        # actualizaciones de estado (entregado/leído) de mensajes que
+        # nosotros mandamos — a estas últimas no hay nada que responderles.
+        if "messages" not in value or not value["messages"]:
+            return {"status": "ignorado"}
+
+        phone_number_id = value.get("metadata", {}).get("phone_number_id")
+        mensaje = value["messages"][0]
+        id_mensaje = mensaje["id"]
+        numero_remitente = mensaje["from"]  # ya viene en formato "549..." sin '+' ni sufijo
+
+        if mensaje.get("type") != "text":
+            # Milestone 1: solo texto. Audio/imágenes quedan para más adelante.
+            return {"status": "tipo_no_soportado"}
+
+        texto_usuario = mensaje.get("text", {}).get("body", "")
+        if not texto_usuario:
+            return {"status": "ignorado"}
+
+        if await es_mensaje_procesado(id_mensaje):
+            return {"status": "duplicado"}
+
+        if es_troll(numero_remitente):
+            print(f"🤖 [Anti-Troll] {numero_remitente} superó el límite de mensajes, ignorado temporalmente.")
+            return {"status": "rate_limited"}
+
+        comercio = await obtener_comercio_por_meta_phone_id(phone_number_id)
+        if not comercio:
+            print(f"⚠️ [Meta Webhook] No se encontró ningún comercio para phone_number_id {phone_number_id}")
+            return {"status": "comercio_no_encontrado"}
+
+        comercio_id = comercio["id"]
+        id_remitente_limpio = numero_remitente
+
+        await agregar_al_buffer(id_remitente_limpio, {
+            "texto": texto_usuario,
+            "id_mensaje": id_mensaje,
+        })
+
+        if id_remitente_limpio in timers_debounce and not timers_debounce[id_remitente_limpio].done():
+            timers_debounce[id_remitente_limpio].cancel()
+
+        async def timer_task_meta():
+            await asyncio.sleep(TIEMPO_ESPERA_MENSAJE)
+            await cola_mensajes.put((id_remitente_limpio, comercio_id, phone_number_id, numero_remitente, None, "meta"))
+
+        timers_debounce[id_remitente_limpio] = asyncio.create_task(timer_task_meta())
+        return {"status": "en_espera"}
+
+    except Exception as e:
+        print(f"Error procesando mensaje de Meta: {e}")
+        return {"status": "error"}
+
 
 # --- ENDPOINTS MERCADOPAGO ---
 @app.post("/api/checkout/crear-preferencia")

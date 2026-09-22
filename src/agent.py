@@ -231,14 +231,150 @@ def iniciar_agente(comercio_id, telefono_cliente, historial_base=None):
     configuracion_ia = types.GenerateContentConfig(
         system_instruction=instrucciones,
         tools=[consultar_inventario, consultar_horarios, agendar_cita, solicitar_asistencia_humana],
-        temperature=0.2, 
+        temperature=0.2,
     )
-    
+
     # Creamos el chat inyectándole su memoria pasada si existía
     chat = client.chats.create(
         model='gemini-2.5-flash',
         config=configuracion_ia,
         history=historial_gemini if historial_gemini else None
     )
-    
+
+    return chat
+
+
+def iniciar_agente_consultorio(comercio_id, telefono_cliente, historial_base=None):
+    """Agente de IA para la vertical 'consultorio' (odontólogos, médicos en
+    general). Mismo mecanismo que iniciar_agente (function-calling de
+    Gemini con wrappers que cierran sobre comercio_id/telefono_cliente),
+    pero con un prompt y unas tools propias del rubro — nada de canje,
+    garantías de equipos ni inventario."""
+
+    conf_consultorio = tools.obtener_configuracion_consultorio(comercio_id)
+    nombre_consultorio = tools.obtener_nombre_comercio(comercio_id)
+
+    # --- WRAPPERS DE SEGURIDAD BLINDADOS 🛡️ ---
+    def consultar_horarios() -> str:
+        """Consulta los horarios de atención del consultorio."""
+        try:
+            resultado = tools.consultar_horarios(comercio_id, telefono_cliente)
+            return str(resultado) if resultado else "Horarios no disponibles."
+        except Exception as e:
+            print(f"⚠️ [Tool Error] consultar_horarios: {e}")
+            return "Error al consultar horarios."
+
+    def agendar_turno(paciente_nombre: str, telefono: str, especialidad: str, fecha_turno: str) -> str:
+        """Agenda un turno o reprograma uno existente. IMPORTANTE: fecha_turno DEBE enviarse en formato 'YYYY-MM-DD HH:MM:00'."""
+        try:
+            resultado = tools.agendar_turno_consultorio(paciente_nombre, telefono, especialidad, fecha_turno, comercio_id)
+            return str(resultado) if resultado else "No se pudo agendar el turno."
+        except Exception as e:
+            print(f"⚠️ [Tool Error] agendar_turno: {e}")
+            return "Error al agendar en el sistema. Solicitar asistencia humana."
+
+    def cancelar_turno() -> str:
+        """Cancela el turno pendiente del paciente que está escribiendo, si tiene uno."""
+        try:
+            resultado = tools.cancelar_turno_consultorio(telefono_cliente, comercio_id)
+            return str(resultado) if resultado else "No se pudo cancelar el turno."
+        except Exception as e:
+            print(f"⚠️ [Tool Error] cancelar_turno: {e}")
+            return "Error al cancelar en el sistema. Solicitar asistencia humana."
+
+    def solicitar_asistencia_humana(motivo: str) -> str:
+        """Notifica de inmediato al dueño/encargado del consultorio para que intervenga manualmente en este chat."""
+        try:
+            resultado = tools.solicitar_asistencia_humana_consultorio(motivo, telefono_cliente, comercio_id)
+            return str(resultado) if resultado else "Notificación enviada."
+        except Exception as e:
+            print(f"⚠️ [Tool Error] solicitar_asistencia_humana: {e}")
+            return "Notificación enviada al dueño con éxito."
+
+    # --- NOCIÓN DEL TIEMPO Y CALENDARIO ANTI-ALUCINACIÓN 📅 (igual que iniciar_agente) ---
+    tz = ZoneInfo('America/Argentina/Buenos_Aires')
+    ahora = datetime.now(tz)
+    dias_es = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    meses_es = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
+    def obtener_fecha_str(fecha_obj):
+        return f"{dias_es[fecha_obj.weekday()]} {fecha_obj.day} de {meses_es[fecha_obj.month - 1]} de {fecha_obj.year}"
+
+    fecha_actual_str = f"{obtener_fecha_str(ahora)} a las {ahora.strftime('%H:%M')} hs"
+    calendario_proximos_dias = [obtener_fecha_str(ahora + timedelta(days=i)) for i in range(8)]
+    str_calendario = " | ".join(calendario_proximos_dias)
+
+    direccion_cruda = (conf_consultorio.get('direccion_fisica') or '').strip()
+    if not direccion_cruda or direccion_cruda.upper() == 'NUESTRO_CONSULTORIO':
+        direccion_final = "el consultorio (te vamos a confirmar la dirección exacta por acá)"
+    else:
+        direccion_final = direccion_cruda
+
+    especialidades = conf_consultorio.get('especialidades') or "consultas generales"
+    faq_texto = (conf_consultorio.get('faq_texto') or '').strip()
+    bloque_faq = f"\n    PREGUNTAS FRECUENTES DE ESTE CONSULTORIO (respondé con esta info cuando aplique):\n    {faq_texto}\n" if faq_texto else ""
+
+    instrucciones = f"""
+    Eres la secretaria virtual de {nombre_consultorio}, un consultorio de salud. Atendés las 24 horas por WhatsApp.
+
+    TU TONO Y ESTILO:
+    - Hablas de forma cálida, respetuosa y profesional. Utiliza el trato de 'vos'.
+    - Sé clara y concisa, sin tecnicismos médicos innecesarios.
+    - REGLA DE IDENTIDAD: Preséntate como parte del equipo del consultorio. Jamás menciones que eres una IA o bot.
+
+    🌟 REGLA DE SALUDO:
+    Si el paciente solo saluda: "Hola! Somos {nombre_consultorio}. En qué te puedo ayudar?"
+    Si saluda y hace una consulta en el mismo mensaje: presentate brevemente y respondé directo a su consulta.
+
+    CONTEXTO TEMPORAL ACTUAL ESTRICTO: Hoy es {fecha_actual_str}.
+    Para calcular cualquier fecha futura (como "mañana"), usá este calendario de los próximos días:
+    [ {str_calendario} ]
+
+    ESPECIALIDADES QUE OFRECE ESTE CONSULTORIO: {especialidades}
+    {bloque_faq}
+
+    TUS REGLAS DE COMPORTAMIENTO:
+
+    1. PREGUNTAS FRECUENTES: Si la pregunta del paciente está cubierta en la lista de FAQ de arriba, respondé con esa información. Si no sabés algo, no inventes — ejecutá 'solicitar_asistencia_humana'.
+
+    2. AGENDAR UN TURNO (paso previo obligatorio):
+       - ANTES DE PEDIR DATOS: si el paciente hizo otras preguntas en el mismo mensaje, respondelas primero.
+       - Pedí: nombre completo, teléfono, especialidad deseada, y día/horario preferido.
+       - Paso 1 (confirmación explícita): proponé el turno basándote en el calendario estricto. Ej: "Te queda bien el Miércoles 17 de Junio a las 17:30 hs para Odontología general? Confirmame?"
+       - Paso 2: SOLO cuando el paciente confirme explícitamente ("Sí", "Dale"), ejecutá la herramienta 'agendar_turno'.
+       - Paso 3: si la herramienta responde que el horario está lleno, pedí disculpas y ofrecé un horario cercano.
+       - Paso 4 (cierre obligatorio): una vez agendado con éxito, confirmá TODOS los datos: "Perfecto! Tu turno de [especialidad] quedó para el [día y fecha] a las [hora] hs. Te esperamos en {direccion_final}"
+       - REPROGRAMACIONES: si el paciente ya tenía un turno pendiente y pide otro horario, la herramienta lo reprograma automáticamente — aclaralo en tu mensaje de confirmación.
+
+    3. CANCELAR UN TURNO: si el paciente pide cancelar (sin pedir uno nuevo), ejecutá 'cancelar_turno' y confirmale que quedó cancelado.
+
+    4. FILTRO DE ATENCIÓN HUMANA:
+       - Si el paciente insiste en hablar con una persona, o menciona una urgencia médica, ejecutá 'solicitar_asistencia_humana' de inmediato.
+       - Si no sabés algo con certeza, ejecutá 'solicitar_asistencia_humana' en vez de inventar información médica.
+
+    5. MANEJO DE INDISPONIBILIDAD: si una herramienta responde 'SISTEMA_DELAY', pedile al paciente que aguarde unos instantes.
+    """
+
+    historial_gemini = []
+    if historial_base:
+        for reg in historial_base:
+            historial_gemini.append(
+                types.Content(
+                    role=reg["rol"],
+                    parts=[types.Part.from_text(text=reg["contenido"])]
+                )
+            )
+
+    configuracion_ia = types.GenerateContentConfig(
+        system_instruction=instrucciones,
+        tools=[consultar_horarios, agendar_turno, cancelar_turno, solicitar_asistencia_humana],
+        temperature=0.2,
+    )
+
+    chat = client.chats.create(
+        model='gemini-2.5-flash',
+        config=configuracion_ia,
+        history=historial_gemini if historial_gemini else None
+    )
+
     return chat

@@ -3,6 +3,7 @@ import requests
 import json
 from datetime import datetime, timedelta, timezone
 import config
+import meta_client
 from database import supabase
 
 def consultar_inventario(modelo_corregido: str, comercio_id: int, telefono_cliente: str) -> str:
@@ -369,6 +370,192 @@ def solicitar_asistencia_humana(motivo: str, telefono_cliente: str, comercio_id:
             return "Éxito: El dueño ha sido notificado"
         else:
             return "No se pudo enviar la notificación por problemas de API"
+
+    except Exception as e:
+        return f"Error interno al procesar la asistencia: {str(e)}"
+
+
+# ==========================================================================
+# VERTICAL "CONSULTORIO" (odontólogos, médicos en general) — Meta Cloud API
+# ==========================================================================
+# Mismos patrones que la vertical "celulares" de arriba (upsert por teléfono
+# para reprogramar, lock atómico para recordatorios, config con fila default
+# on-demand), pero contra tablas propias (turnos_consultorio,
+# configuracion_consultorios) que no tocan nada de lo que ya usa Novva.
+
+def obtener_configuracion_consultorio(comercio_id: int) -> dict:
+    """Trae la configuración del consultorio, o crea una fila por defecto
+    si todavía no la tiene (mismo patrón que obtener_configuracion_comercio)."""
+    try:
+        response = supabase.table("configuracion_consultorios") \
+            .select("*") \
+            .eq("comercio_id", int(comercio_id)) \
+            .execute()
+
+        if response.data:
+            return response.data[0]
+
+        print(f"⚠️ [Sistema] Comercio ID {comercio_id} (consultorio) sin configuración. Creando fila por defecto...")
+
+        tel_dueno = None
+        try:
+            res_comercio = supabase.table("comercios").select("telefono_dueno").eq("id", int(comercio_id)).execute()
+            if res_comercio.data:
+                tel_dueno = res_comercio.data[0].get("telefono_dueno")
+        except Exception as e_tel:
+            print(f"[Sistema] ⚠️ No se pudo obtener el teléfono del dueño para la config: {e_tel}")
+
+        config_default = {
+            "comercio_id": int(comercio_id),
+            "especialidades": "Odontología general",
+            "direccion_fisica": "NUESTRO_CONSULTORIO",
+            "telefono_dueno": tel_dueno,
+            "faq_texto": "",
+            "horas_anticipacion_recordatorio": 24,
+            "max_turnos_por_horario": 1,
+        }
+        supabase.table("configuracion_consultorios").insert(config_default).execute()
+        print(f"✅ [Sistema] Configuración de consultorio inicializada para Comercio ID: {comercio_id}")
+        return config_default
+
+    except Exception as e:
+        print(f"[Sistema] ❌ Error leyendo/creando configuración del consultorio: {e}")
+        return {
+            "especialidades": "",
+            "direccion_fisica": "nuestro consultorio",
+            "telefono_dueno": None,
+            "faq_texto": "",
+            "horas_anticipacion_recordatorio": 24,
+            "max_turnos_por_horario": 1,
+        }
+
+
+def agendar_turno_consultorio(paciente_nombre: str, telefono: str, especialidad: str, fecha_turno: str, comercio_id: int = None) -> str:
+    """Agenda un turno de consultorio, o lo reprograma si ese teléfono ya
+    tenía uno pendiente (upsert por teléfono, igual que agendar_cita)."""
+    print(f"\n[Sistema] 📅 agendar_turno_consultorio: {paciente_nombre} ({telefono}) - {especialidad} - {fecha_turno}")
+    try:
+        try:
+            fecha_objetivo = datetime.strptime(fecha_turno, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            settings = {'PREFER_DATES_FROM': 'future', 'TIMEZONE': 'America/Argentina/Buenos_Aires', 'DATE_ORDER': 'DMY'}
+            fecha_objetivo = dateparser.parse(fecha_turno, languages=['es'], settings=settings)
+
+        if not fecha_objetivo:
+            return f"Error técnico: No se pudo formatear la fecha {fecha_turno}"
+
+        fecha_iso = fecha_objetivo.strftime("%Y-%m-%d %H:%M:%S")
+
+        conf = obtener_configuracion_consultorio(comercio_id)
+        horas_anticipacion = int(conf.get("horas_anticipacion_recordatorio") or 24)
+        max_turnos = int(conf.get("max_turnos_por_horario") or 1)
+        fecha_disparo_recordatorio = fecha_objetivo - timedelta(hours=horas_anticipacion)
+
+        turno_existente = supabase.table("turnos_consultorio") \
+            .select("*") \
+            .eq("telefono", telefono) \
+            .eq("comercio_id", int(comercio_id)) \
+            .eq("estado", "pendiente") \
+            .execute()
+
+        turno_viejo_id = turno_existente.data[0]["id"] if turno_existente.data else None
+
+        query_cupos = supabase.table("turnos_consultorio") \
+            .select("id") \
+            .eq("comercio_id", int(comercio_id)) \
+            .eq("fecha_turno", fecha_iso) \
+            .eq("estado", "pendiente")
+        if turno_viejo_id:
+            query_cupos = query_cupos.neq("id", turno_viejo_id)
+
+        turnos_en_horario = query_cupos.execute()
+        if len(turnos_en_horario.data) >= max_turnos:
+            return f"El horario de las {fecha_objetivo.strftime('%H:%M')} hs ya está lleno. Dile al paciente que ofrezca un horario cercano (anterior o posterior)."
+
+        if turno_viejo_id:
+            supabase.table("turnos_consultorio").update({
+                "paciente_nombre": paciente_nombre,
+                "especialidad": especialidad,
+                "fecha_turno": fecha_iso,
+                "recordatorio_enviado": False,
+            }).eq("id", turno_viejo_id).execute()
+
+            _programar_upstash_desde_tools("turno_consultorio", turno_viejo_id, fecha_disparo_recordatorio)
+            return f"turno reprogramado para el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')} hs"
+
+        insert_payload = {
+            "comercio_id": int(comercio_id),
+            "paciente_nombre": paciente_nombre,
+            "telefono": telefono,
+            "especialidad": especialidad,
+            "fecha_turno": fecha_iso,
+            "estado": "pendiente",
+            "recordatorio_enviado": False,
+        }
+        res_insert = supabase.table("turnos_consultorio").insert(insert_payload).execute()
+
+        if res_insert.data:
+            nuevo_turno_id = res_insert.data[0]["id"]
+            _programar_upstash_desde_tools("turno_consultorio", nuevo_turno_id, fecha_disparo_recordatorio)
+
+        return f"turno agendado para el {fecha_objetivo.strftime('%A %d/%m a las %H:%M')} hs"
+
+    except Exception as e:
+        print(f"[Falla Crítica] ❌ Error en agendar_turno_consultorio: {e}")
+        solicitar_asistencia_humana_consultorio(f"Falla al intentar agendar un turno para {paciente_nombre}", telefono, comercio_id)
+        return "SISTEMA_DELAY: Hubo un problema al guardar el turno, avisale de forma tranquila que ya se notificó al consultorio para confirmarlo a mano"
+
+
+def cancelar_turno_consultorio(telefono: str, comercio_id: int = None) -> str:
+    """Cancela el turno pendiente de ese teléfono, si tiene uno."""
+    print(f"\n[Sistema] ❌ cancelar_turno_consultorio: {telefono}")
+    try:
+        turno_existente = supabase.table("turnos_consultorio") \
+            .select("id") \
+            .eq("telefono", telefono) \
+            .eq("comercio_id", int(comercio_id)) \
+            .eq("estado", "pendiente") \
+            .execute()
+
+        if not turno_existente.data:
+            return "Este paciente no tiene ningún turno pendiente para cancelar."
+
+        turno_id = turno_existente.data[0]["id"]
+        supabase.table("turnos_consultorio").update({"estado": "cancelado"}).eq("id", turno_id).execute()
+        return "Listo, el turno quedó cancelado."
+
+    except Exception as e:
+        print(f"[Falla Crítica] ❌ Error en cancelar_turno_consultorio: {e}")
+        return "SISTEMA_DELAY: Hubo un problema al cancelar el turno, avisale que ya se notificó al consultorio para confirmarlo a mano"
+
+
+def solicitar_asistencia_humana_consultorio(motivo: str, telefono_cliente: str, comercio_id: int) -> str:
+    """Igual que solicitar_asistencia_humana, pero manda la alerta al dueño
+    por Meta Cloud API en vez de Evolution (esta vertical no tiene
+    evolution_instance, tiene meta_phone_number_id/meta_access_token)."""
+    print(f"\n[Sistema] 🚨 Solicitando asistencia humana (consultorio) para Comercio ID: {comercio_id}. Motivo: {motivo}")
+    try:
+        conf = obtener_configuracion_consultorio(comercio_id)
+        telefono_dueno = conf.get("telefono_dueno")
+        if not telefono_dueno:
+            return "No se pudo alertar al dueño porque no tiene configurado un teléfono de soporte"
+
+        comercio_res = supabase.table("comercios").select("meta_phone_number_id, meta_access_token").eq("id", int(comercio_id)).execute()
+        if not comercio_res.data:
+            return "Error: No se encontraron las credenciales de Meta de este consultorio"
+
+        phone_number_id = comercio_res.data[0]["meta_phone_number_id"]
+        access_token = comercio_res.data[0]["meta_access_token"]
+        cliente_numero_limpio = telefono_cliente.split("@")[0]
+
+        texto_alerta = (
+            f"🚨 *Intervención requerida*\n\n"
+            f"📱 *Número del paciente:* {cliente_numero_limpio}\n"
+            f"📌 *Motivo:* {motivo}"
+        )
+
+        enviado = meta_client.enviar_mensaje_whatsapp_meta(telefono_dueno, texto_alerta, phone_number_id, access_token)
+        return "Éxito: El dueño ha sido notificado" if enviado else "No se pudo enviar la notificación por problemas de API"
 
     except Exception as e:
         return f"Error interno al procesar la asistencia: {str(e)}"
