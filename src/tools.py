@@ -430,10 +430,70 @@ def obtener_configuracion_consultorio(comercio_id: int) -> dict:
         }
 
 
-def agendar_turno_consultorio(paciente_nombre: str, telefono: str, especialidad: str, fecha_turno: str, comercio_id: int = None) -> str:
+def obtener_profesionales_consultorio(comercio_id: int) -> list:
+    """Trae los profesionales activos de un consultorio. Una lista vacía
+    significa "agenda única compartida" (el comportamiento de siempre)."""
+    try:
+        response = supabase.table("profesionales_consultorio") \
+            .select("*") \
+            .eq("comercio_id", int(comercio_id)) \
+            .eq("activo", True) \
+            .execute()
+        return response.data or []
+    except Exception as e:
+        print(f"[Sistema] ❌ Error leyendo profesionales del consultorio: {e}")
+        return []
+
+
+def _coincide(a: str, b: str) -> bool:
+    """Match flexible en ambas direcciones (ej. 'Odontología' coincide con
+    'Odontología general' y viceversa), sin depender de un texto exacto."""
+    a, b = (a or "").strip().lower(), (b or "").strip().lower()
+    return bool(a) and bool(b) and (a in b or b in a)
+
+
+def consultar_horarios_consultorio(comercio_id: int, profesional: str = None) -> str:
+    """Consulta los horarios de atención del consultorio — versión propia
+    de esta vertical (no toca consultar_horarios, que sigue usando
+    celulares sin cambios). Si se pide un profesional puntual, filtra por
+    su agenda; si no, muestra todo desglosado por persona cuando el
+    consultorio tiene varios profesionales configurados."""
+    print(f"\n[Sistema] 🕐 Consultando horarios de consultorio - Comercio: {comercio_id}")
+    try:
+        profesionales = obtener_profesionales_consultorio(comercio_id)
+        nombres_por_id = {p["id"]: p["nombre"] for p in profesionales}
+
+        query = supabase.table("horarios_atencion") \
+            .select("*") \
+            .eq("comercio_id", int(comercio_id)) \
+            .eq("activo", True)
+
+        if profesional:
+            match = next((p for p in profesionales if _coincide(profesional, p["nombre"])), None)
+            if match:
+                query = query.eq("profesional_id", match["id"])
+
+        datos = query.order("id").execute().data
+        if not datos:
+            return "No hay horarios de atención configurados en este momento"
+
+        resultado = "Nuestros horarios:\n"
+        for h in datos:
+            apertura = h['hora_apertura'][:5] if h['hora_apertura'] else '—'
+            cierre = h['hora_cierre'][:5] if h['hora_cierre'] else '—'
+            nombre_prof = nombres_por_id.get(h.get("profesional_id"))
+            prefijo = f"{nombre_prof} - " if nombre_prof else ""
+            resultado += f"- {prefijo}{h['dia_semana']}: de {apertura} a {cierre}\n"
+        return resultado.strip()
+    except Exception as e:
+        print(f"[Falla Crítica] ❌ Error en horarios de consultorio: {e}")
+        return "SISTEMA_DELAY: No se pudieron leer los horarios, ya notificamos automáticamente a un asesor humano. Pide disculpas de forma muy cercana y dile que un compañero lo atenderá enseguida"
+
+
+def agendar_turno_consultorio(paciente_nombre: str, telefono: str, especialidad: str, fecha_turno: str, profesional: str = None, comercio_id: int = None) -> str:
     """Agenda un turno de consultorio, o lo reprograma si ese teléfono ya
     tenía uno pendiente (upsert por teléfono, igual que agendar_cita)."""
-    print(f"\n[Sistema] 📅 agendar_turno_consultorio: {paciente_nombre} ({telefono}) - {especialidad} - {fecha_turno}")
+    print(f"\n[Sistema] 📅 agendar_turno_consultorio: {paciente_nombre} ({telefono}) - {especialidad} - {fecha_turno} - profesional={profesional}")
     try:
         try:
             fecha_objetivo = datetime.strptime(fecha_turno, "%Y-%m-%d %H:%M:%S")
@@ -451,6 +511,28 @@ def agendar_turno_consultorio(paciente_nombre: str, telefono: str, especialidad:
         max_turnos = int(conf.get("max_turnos_por_horario") or 1)
         fecha_disparo_recordatorio = fecha_objetivo - timedelta(hours=horas_anticipacion)
 
+        # Resolución de profesional: una lista vacía = agenda única (como
+        # siempre). Si hay profesionales reales, cualquier caso ambiguo se
+        # devuelve para que el agente le pregunte al paciente — nunca cae
+        # en silencio a la agenda general, porque ahí ya no representaría
+        # la agenda de nadie de verdad.
+        profesionales = obtener_profesionales_consultorio(comercio_id)
+        profesional_id = None
+        if profesionales:
+            if profesional:
+                match = next((p for p in profesionales if _coincide(profesional, p["nombre"])), None)
+                if not match:
+                    nombres = ", ".join(p["nombre"] for p in profesionales)
+                    return f"No encontramos a '{profesional}' en el equipo. Profesionales disponibles: {nombres}. Preguntale al paciente con cuál prefiere y volvé a intentar."
+                profesional_id = match["id"]
+            else:
+                candidatos = [p for p in profesionales if _coincide(especialidad, p.get("especialidad") or "")]
+                if len(candidatos) == 1:
+                    profesional_id = candidatos[0]["id"]
+                else:
+                    nombres = ", ".join(p["nombre"] for p in (candidatos or profesionales))
+                    return f"Para {especialidad} atienden: {nombres}. Preguntale al paciente con cuál profesional prefiere el turno y volvé a intentar pasando ese nombre."
+
         turno_existente = supabase.table("turnos_consultorio") \
             .select("*") \
             .eq("telefono", telefono) \
@@ -465,6 +547,8 @@ def agendar_turno_consultorio(paciente_nombre: str, telefono: str, especialidad:
             .eq("comercio_id", int(comercio_id)) \
             .eq("fecha_turno", fecha_iso) \
             .eq("estado", "pendiente")
+        if profesional_id is not None:
+            query_cupos = query_cupos.eq("profesional_id", profesional_id)
         if turno_viejo_id:
             query_cupos = query_cupos.neq("id", turno_viejo_id)
 
@@ -477,6 +561,7 @@ def agendar_turno_consultorio(paciente_nombre: str, telefono: str, especialidad:
                 "paciente_nombre": paciente_nombre,
                 "especialidad": especialidad,
                 "fecha_turno": fecha_iso,
+                "profesional_id": profesional_id,
                 "recordatorio_enviado": False,
             }).eq("id", turno_viejo_id).execute()
 
@@ -489,6 +574,7 @@ def agendar_turno_consultorio(paciente_nombre: str, telefono: str, especialidad:
             "telefono": telefono,
             "especialidad": especialidad,
             "fecha_turno": fecha_iso,
+            "profesional_id": profesional_id,
             "estado": "pendiente",
             "recordatorio_enviado": False,
         }

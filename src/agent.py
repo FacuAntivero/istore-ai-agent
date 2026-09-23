@@ -253,21 +253,22 @@ def iniciar_agente_consultorio(comercio_id, telefono_cliente, historial_base=Non
 
     conf_consultorio = tools.obtener_configuracion_consultorio(comercio_id)
     nombre_consultorio = tools.obtener_nombre_comercio(comercio_id)
+    profesionales_consultorio = tools.obtener_profesionales_consultorio(comercio_id)
 
     # --- WRAPPERS DE SEGURIDAD BLINDADOS 🛡️ ---
-    def consultar_horarios() -> str:
-        """Consulta los horarios de atención del consultorio."""
+    def consultar_horarios(profesional: str = None) -> str:
+        """Consulta los horarios de atención del consultorio. Si el consultorio tiene varios profesionales, se puede pedir el horario de uno puntual."""
         try:
-            resultado = tools.consultar_horarios(comercio_id, telefono_cliente)
+            resultado = tools.consultar_horarios_consultorio(comercio_id, profesional)
             return str(resultado) if resultado else "Horarios no disponibles."
         except Exception as e:
             print(f"⚠️ [Tool Error] consultar_horarios: {e}")
             return "Error al consultar horarios."
 
-    def agendar_turno(paciente_nombre: str, telefono: str, especialidad: str, fecha_turno: str) -> str:
-        """Agenda un turno o reprograma uno existente. IMPORTANTE: fecha_turno DEBE enviarse en formato 'YYYY-MM-DD HH:MM:00'."""
+    def agendar_turno(paciente_nombre: str, telefono: str, especialidad: str, fecha_turno: str, profesional: str = None) -> str:
+        """Agenda un turno o reprograma uno existente. IMPORTANTE: fecha_turno DEBE enviarse en formato 'YYYY-MM-DD HH:MM:00'. Si el consultorio tiene varios profesionales, pasá 'profesional' con el nombre que eligió el paciente."""
         try:
-            resultado = tools.agendar_turno_consultorio(paciente_nombre, telefono, especialidad, fecha_turno, comercio_id)
+            resultado = tools.agendar_turno_consultorio(paciente_nombre, telefono, especialidad, fecha_turno, profesional, comercio_id)
             return str(resultado) if resultado else "No se pudo agendar el turno."
         except Exception as e:
             print(f"⚠️ [Tool Error] agendar_turno: {e}")
@@ -314,6 +315,15 @@ def iniciar_agente_consultorio(comercio_id, telefono_cliente, historial_base=Non
     faq_texto = (conf_consultorio.get('faq_texto') or '').strip()
     bloque_faq = f"\n    PREGUNTAS FRECUENTES DE ESTE CONSULTORIO (respondé con esta info cuando aplique):\n    {faq_texto}\n" if faq_texto else ""
 
+    if profesionales_consultorio:
+        equipo_str = ", ".join(
+            f"{p['nombre']} ({p['especialidad']})" if p.get('especialidad') else p['nombre']
+            for p in profesionales_consultorio
+        )
+        bloque_especialidades = f"EQUIPO DE ESTE CONSULTORIO: {equipo_str}"
+    else:
+        bloque_especialidades = f"ESPECIALIDADES QUE OFRECE ESTE CONSULTORIO: {especialidades}"
+
     instrucciones = f"""
     Eres la secretaria virtual de {nombre_consultorio}, un consultorio de salud. Atendés las 24 horas por WhatsApp.
 
@@ -330,7 +340,7 @@ def iniciar_agente_consultorio(comercio_id, telefono_cliente, historial_base=Non
     Para calcular cualquier fecha futura (como "mañana"), usá este calendario de los próximos días:
     [ {str_calendario} ]
 
-    ESPECIALIDADES QUE OFRECE ESTE CONSULTORIO: {especialidades}
+    {bloque_especialidades}
     {bloque_faq}
 
     TUS REGLAS DE COMPORTAMIENTO:
@@ -339,12 +349,12 @@ def iniciar_agente_consultorio(comercio_id, telefono_cliente, historial_base=Non
 
     2. AGENDAR UN TURNO (paso previo obligatorio):
        - ANTES DE PEDIR DATOS: si el paciente hizo otras preguntas en el mismo mensaje, respondelas primero.
-       - Pedí: nombre completo, teléfono, especialidad deseada, y día/horario preferido.
+       - Pedí: nombre completo, teléfono, especialidad deseada, y día/horario preferido. Si este consultorio tiene más de un profesional (ver EQUIPO arriba) y no es obvio con cuál, preguntá con cuál profesional prefiere atenderse.
        - Paso 1 (confirmación explícita): proponé el turno basándote en el calendario estricto. Ej: "Te queda bien el Miércoles 17 de Junio a las 17:30 hs para Odontología general? Confirmame?"
-       - Paso 2: SOLO cuando el paciente confirme explícitamente ("Sí", "Dale"), ejecutá la herramienta 'agendar_turno'.
-       - Paso 3: si la herramienta responde que el horario está lleno, pedí disculpas y ofrecé un horario cercano.
+       - Paso 2: SOLO cuando el paciente confirme explícitamente ("Sí", "Dale"), ejecutá la herramienta 'agendar_turno', pasando 'profesional' si el consultorio tiene equipo.
+       - Paso 3: si la herramienta responde que el horario está lleno, pedí disculpas y ofrecé un horario cercano. Si la herramienta te devuelve una lista de profesionales para elegir (porque hay más de uno para esa especialidad, o el nombre que diste no coincide con nadie del equipo), preguntale al paciente cuál prefiere y volvé a ejecutar 'agendar_turno' con ese nombre — no inventes ni asumas.
        - Paso 4 (cierre obligatorio): una vez agendado con éxito, confirmá TODOS los datos: "Perfecto! Tu turno de [especialidad] quedó para el [día y fecha] a las [hora] hs. Te esperamos en {direccion_final}"
-       - REPROGRAMACIONES: si el paciente ya tenía un turno pendiente y pide otro horario, la herramienta lo reprograma automáticamente — aclaralo en tu mensaje de confirmación.
+       - REPROGRAMACIONES: si el paciente ya tenía un turno pendiente y pide otro horario (o quiere cambiar de profesional), la herramienta lo reprograma automáticamente — aclaralo en tu mensaje de confirmación.
 
     3. CANCELAR UN TURNO: si el paciente pide cancelar (sin pedir uno nuevo), ejecutá 'cancelar_turno' y confirmale que quedó cancelado.
 

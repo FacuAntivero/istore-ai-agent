@@ -398,27 +398,29 @@ async def procesar_envio_inmediato(tipo: str, registro_id: int):
 
             res = await asyncio.to_thread(
                 lambda: supabase.table("turnos_consultorio")
-                .select("*, comercio:comercio_id(meta_phone_number_id, meta_access_token)")
+                .select("*, comercio:comercio_id(meta_phone_number_id, meta_access_token), profesional:profesional_id(nombre)")
                 .eq("id", registro_id)
                 .execute()
             )
             turno = res.data[0]
             phone_number_id = turno.get("comercio", {}).get("meta_phone_number_id")
             access_token = turno.get("comercio", {}).get("meta_access_token")
+            nombre_profesional = (turno.get("profesional") or {}).get("nombre") or "el equipo"
 
             fecha_obj = datetime.fromisoformat(turno["fecha_turno"].replace("Z", ""))
 
             # ⚠️ Esto es un mensaje iniciado por el negocio (el paciente no
             # escribió primero), así que Meta exige una plantilla
             # pre-aprobada, no texto libre. El nombre "recordatorio_turno" y
-            # sus 3 variables ({{1}}=paciente, {{2}}=fecha, {{3}}=hora) hay
-            # que darlos de alta y esperar la aprobación en Meta Business
-            # Manager antes de que este envío funcione de verdad.
+            # sus 4 variables ({{1}}=paciente, {{2}}=fecha, {{3}}=hora,
+            # {{4}}=profesional) hay que darlos de alta y esperar la
+            # aprobación en Meta Business Manager antes de que este envío
+            # funcione de verdad.
             enviado = await asyncio.to_thread(
                 meta_client.enviar_plantilla_whatsapp_meta,
                 turno["telefono"], phone_number_id, access_token,
                 "recordatorio_turno", "es_AR",
-                [turno.get("paciente_nombre", "Paciente"), fecha_obj.strftime("%d/%m"), fecha_obj.strftime("%H:%M")]
+                [turno.get("paciente_nombre", "Paciente"), fecha_obj.strftime("%d/%m"), fecha_obj.strftime("%H:%M"), nombre_profesional]
             )
 
             if enviado:

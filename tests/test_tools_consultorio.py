@@ -18,6 +18,7 @@ def test_agendar_turno_nuevo_exito(monkeypatch):
     monkeypatch.setattr(tools, "_programar_upstash_desde_tools", lambda *a, **k: None)
     tools.supabase = FakeSupabase(results=[
         [CONFIG_DEFAULT],       # obtener_configuracion_consultorio
+        [],                     # obtener_profesionales_consultorio: sin profesionales (agenda única)
         [],                     # turno_existente: no tiene uno previo
         [],                     # query_cupos: el horario está libre
         [{"id": 501}],          # insert
@@ -34,6 +35,7 @@ def test_agendar_turno_reprograma_existente(monkeypatch):
     monkeypatch.setattr(tools, "_programar_upstash_desde_tools", lambda *a, **k: None)
     tools.supabase = FakeSupabase(results=[
         [CONFIG_DEFAULT],       # obtener_configuracion_consultorio
+        [],                     # obtener_profesionales_consultorio: sin profesionales (agenda única)
         [{"id": 77}],           # turno_existente: ya tenía uno pendiente
         [],                     # query_cupos: libre (excluyendo el propio)
         [{"id": 77}],           # update
@@ -50,6 +52,7 @@ def test_agendar_turno_cupo_lleno(monkeypatch):
     monkeypatch.setattr(tools, "_programar_upstash_desde_tools", lambda *a, **k: None)
     tools.supabase = FakeSupabase(results=[
         [CONFIG_DEFAULT],       # obtener_configuracion_consultorio (max_turnos_por_horario=1)
+        [],                     # obtener_profesionales_consultorio: sin profesionales (agenda única)
         [],                     # turno_existente: no tiene uno previo
         [{"id": 999}],          # query_cupos: ya hay 1 turno en ese horario -> lleno
     ])
